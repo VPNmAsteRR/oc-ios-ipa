@@ -67,7 +67,6 @@ jobs:
             -sdk iphoneos \
             -derivedDataPath build \
             -destination 'generic/platform=iOS' \
-            CONFIGURATION_BUILD_DIR="$PWD/build/out" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
@@ -80,7 +79,8 @@ jobs:
           set -euo pipefail
           echo "=== apps found:"
           find build -name '*.app' -type d | head -20
-          APP=$(find build -maxdepth 2 -name '*.app' -type d | head -1)
+          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -1)
+          if [ -z "$APP" ]; then APP=$(find build -name '*.app' -type d | head -1); fi
           echo "app=$APP"
           test -n "$APP"
           rm -rf out && mkdir -p out/Payload
