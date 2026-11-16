@@ -51,8 +51,8 @@ jobs:
         working-directory: apps/mobile/ios
         run: |
           WS=$(ls -d *.xcworkspace | head -1)
-          PROJ=$(ls -d *.xcodeproj | head -1)
-          APPNAME=$(basename "$PROJ" .xcodeproj)
+          PROJ=$(ls -d *.xcodeproj 2>/dev/null | head -1)
+          APPNAME=${PROJ%.xcodeproj}
           echo "project=$PROJ app=$APPNAME"
           echo "=== workspace schemes:"
           xcodebuild -workspace "$WS" -list
