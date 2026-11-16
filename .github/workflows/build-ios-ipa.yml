@@ -65,7 +65,7 @@ jobs:
             -scheme "${{ steps.xc.outputs.scheme }}" \
             -configuration Release \
             -sdk iphoneos \
-            -derivedDataPath build \
+            -derivedDataPath "$PWD/dd" \
             -destination 'generic/platform=iOS' \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -77,10 +77,11 @@ jobs:
         working-directory: apps/mobile/ios
         run: |
           set -euo pipefail
-          echo "=== apps found:"
-          find build -name '*.app' -type d | head -20
-          APP=$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' -type d | head -1)
-          if [ -z "$APP" ]; then APP=$(find build -name '*.app' -type d | head -1); fi
+          echo "=== dd tree:"
+          ls -la dd 2>/dev/null | head
+          find "$PWD/dd" -name '*.app' -type d 2>/dev/null | head -20
+          APP=$(find "$PWD/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1)
+          if [ -z "$APP" ]; then APP=$(find "$PWD/dd" -name '*.app' -type d 2>/dev/null | grep -v 'Pods\|Tests' | head -1); fi
           echo "app=$APP"
           test -n "$APP"
           rm -rf out && mkdir -p out/Payload
