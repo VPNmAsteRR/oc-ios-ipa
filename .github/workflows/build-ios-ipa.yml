@@ -76,8 +76,14 @@ jobs:
         working-directory: apps/mobile/ios
         run: |
           set -euo pipefail
-          APP=$(find build/OpenCode.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)
+          echo "=== searching archives/apps"
+          find . -maxdepth 4 -name '*.xcarchive' -o -maxdepth 6 -name '*.app' -type d | head -20
+          APP=$(find . -path '*.xcarchive/Products/Applications/*.app' -maxdepth 8 -type d | head -1)
+          if [ -z "$APP" ]; then
+            APP=$(find . -name '*.app' -type d -not -path '*/Pods/*' -not -path '*/build/Build/*' | head -1)
+          fi
           echo "app=$APP"
+          test -n "$APP"
           rm -rf out && mkdir -p out/Payload
           cp -R "$APP" out/Payload/
           cd out
