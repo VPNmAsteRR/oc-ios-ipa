@@ -1,0 +1,1034 @@
+import { expect, jest, test } from "@jest/globals";
+import type { OpenCodeEvent } from "@opencode2-mobile/opencode-adapter";
+import { QueryClient } from "@tanstack/react-query";
+
+import {
+  ConnectionEventQueryBridge,
+  eventRequiresConnectionSnapshot,
+  reduceActiveSessions,
+} from "./connection-event-query-bridge";
+import { openCodeQueryKeys } from "./open-code-query-keys";
+
+test("reduces active-session events idempotently", () => {
+  const busy = sessionStatusEvent("event-1", "busy");
+  const first = reduceActiveSessions({}, busy);
+  const duplicate = reduceActiveSessions(first, busy);
+  const idle = reduceActiveSessions(first, sessionStatusEvent("event-2", "idle"));
+
+  expect(first).toEqual({ "session-1": { type: "running" } });
+  expect(duplicate).toBe(first);
+  expect(idle).toEqual({});
+  expect(reduceActiveSessions(idle, sessionStatusEvent("event-3", "idle"))).toBe(idle);
+});
+
+test("removes a deleted session from active state", () => {
+  const current = { "session-1": { type: "running" as const } };
+  const event = {
+    created: 1,
+    data: { sessionID: "session-1" },
+    durable: { aggregateID: "session-1", seq: 2, version: 2 as const },
+    id: "event-1",
+    type: "session.deleted",
+  } satisfies OpenCodeEvent;
+
+  expect(reduceActiveSessions(current, event)).toEqual({});
+});
+
+test("coalesces session metadata invalidations", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const scheduled: Array<() => void> = [];
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) => {
+    scheduled.push(callback);
+  });
+  queryClient.setQueryData(openCodeQueryKeys.activeSessions("connection-1"), {});
+  const messageKey = openCodeQueryKeys.messages(
+    "connection-1",
+    { directory: "/workspace" },
+    "session-1",
+    {},
+  );
+  const followedKey = openCodeQueryKeys.followedProjectSessions(
+    "connection-1",
+    ["project-1"],
+    { limit: 30, order: "desc", parentID: null },
+    1,
+  );
+  queryClient.setQueryData(messageKey, []);
+  queryClient.setQueryData(followedKey, []);
+
+  bridge.apply(sessionRenamedEvent("event-1"));
+  bridge.apply(sessionRenamedEvent("event-2"));
+
+  expect(scheduled).toHaveLength(1);
+  expect(invalidate).not.toHaveBeenCalled();
+  scheduled[0]?.();
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  const messageQuery = queryClient.getQueryCache().find({ queryKey: messageKey });
+  const followedQuery = queryClient.getQueryCache().find({ queryKey: followedKey });
+  expect(messageQuery && invalidate.mock.calls[0]?.[0]?.predicate?.(messageQuery)).toBe(false);
+  expect(followedQuery && invalidate.mock.calls[0]?.[0]?.predicate?.(followedQuery)).toBe(true);
+  queryClient.clear();
+});
+
+test("reconciles one transcript after execution completes", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const firstKey = openCodeQueryKeys.messages(
+    "connection-1",
+    { directory: "/first" },
+    "session-1",
+    {},
+  );
+  const otherSessionKey = openCodeQueryKeys.messages(
+    "connection-1",
+    { directory: "/first" },
+    "session-2",
+    {},
+  );
+  queryClient.setQueryData(firstKey, []);
+  queryClient.setQueryData(otherSessionKey, []);
+
+  bridge.apply(sessionExecutionSucceededEvent("event-1"));
+
+  const messageInvalidation = invalidate.mock.calls.find((call) => {
+    const first = queryClient.getQueryCache().find({ queryKey: firstKey });
+    return Boolean(first && call[0]?.predicate?.(first));
+  });
+  const predicate = messageInvalidation?.[0]?.predicate;
+  const first = queryClient.getQueryCache().find({ queryKey: firstKey });
+  const other = queryClient.getQueryCache().find({ queryKey: otherSessionKey });
+  expect(first && predicate?.(first)).toBe(true);
+  expect(other && predicate?.(other)).toBe(false);
+  queryClient.clear();
+});
+
+test.each(["session.step.streamed", "session.message.content.updated"] as const)(
+  "%s reconciles only the affected transcript",
+  (type) => {
+    const queryClient = new QueryClient();
+    const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+    const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+      callback(),
+    );
+    const location = { directory: "/workspace" };
+    const affectedKey = openCodeQueryKeys.messages("connection-1", location, "session-1", {});
+    const otherKey = openCodeQueryKeys.messages("connection-1", location, "session-2", {});
+    queryClient.setQueryData(affectedKey, []);
+    queryClient.setQueryData(otherKey, []);
+
+    bridge.apply(messageReconciliationEvent(type));
+
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    const predicate = invalidate.mock.calls[0]?.[0]?.predicate;
+    const affected = queryClient.getQueryCache().find({ queryKey: affectedKey });
+    const other = queryClient.getQueryCache().find({ queryKey: otherKey });
+    expect(affected && predicate?.(affected)).toBe(true);
+    expect(other && predicate?.(other)).toBe(false);
+    queryClient.clear();
+  },
+);
+
+test("session idle refreshes its transcript without invalidating other sessions", () => {
+  const queryClient = new QueryClient();
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const location = { directory: "/workspace" };
+  const affectedKey = openCodeQueryKeys.messages("connection-1", location, "session-1", {});
+  const otherKey = openCodeQueryKeys.messages("connection-1", location, "session-2", {});
+  const otherConnectionKey = openCodeQueryKeys.messages("connection-2", location, "session-1", {});
+  for (const key of [affectedKey, otherKey, otherConnectionKey]) queryClient.setQueryData(key, []);
+
+  bridge.apply({
+    created: 1,
+    data: { sessionID: "session-1" },
+    id: "event-idle",
+    location,
+    type: "session.idle",
+  });
+
+  expect(queryClient.getQueryState(affectedKey)?.isInvalidated).toBe(true);
+  expect(queryClient.getQueryState(otherKey)?.isInvalidated).toBe(false);
+  expect(queryClient.getQueryState(otherConnectionKey)?.isInvalidated).toBe(false);
+  queryClient.clear();
+});
+
+test("does not write active-session state for transcript deltas", () => {
+  const queryClient = new QueryClient();
+  const setQueryData = jest.spyOn(queryClient, "setQueryData");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", () => undefined);
+  const event = sessionTextDeltaEvent("event-1");
+
+  bridge.apply(event);
+  bridge.apply({ ...event, id: "event-2" });
+
+  expect(setQueryData).not.toHaveBeenCalled();
+  queryClient.clear();
+});
+
+test("does not refetch session lists for transcript deltas", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+
+  bridge.apply(
+    transcriptEvent("event-0", "session.text.started", {
+      assistantMessageID: "message-1",
+      ordinal: 0,
+      sessionID: "session-1",
+    }),
+  );
+  bridge.apply(sessionTextDeltaEvent("event-1"));
+
+  expect(invalidate).not.toHaveBeenCalled();
+  queryClient.clear();
+});
+
+test("does not refetch session lists for volatile usage updates", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+
+  bridge.apply({
+    created: 1,
+    data: {
+      cost: 1,
+      sessionID: "session-1",
+      tokens: { cache: { read: 0, write: 0 }, input: 1, output: 1, reasoning: 0 },
+    },
+    id: "event-usage",
+    location: { directory: "/workspace" },
+    type: "session.usage.updated",
+  });
+
+  expect(invalidate).not.toHaveBeenCalled();
+  queryClient.clear();
+});
+
+test("does not refetch connection queries for file-change hints", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+
+  bridge.apply({
+    created: 1,
+    data: { event: "change", file: "/redacted" },
+    id: "event-file",
+    location: { directory: "/workspace" },
+    type: "filesystem.changed",
+  });
+
+  expect(invalidate).not.toHaveBeenCalled();
+  queryClient.clear();
+});
+
+test("shell lifecycle events refresh shell output only within the owning connection and location", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const scheduled: Array<() => void> = [];
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) => {
+    scheduled.push(callback);
+  });
+
+  const affected = openCodeQueryKeys.shell("connection-1", { directory: "/workspace" }, "sh_test");
+  const unaffected = [
+    openCodeQueryKeys.shell("connection-2", { directory: "/workspace" }, "sh_test"),
+    openCodeQueryKeys.shell("connection-1", { directory: "/other" }, "sh_test"),
+    openCodeQueryKeys.shell(
+      "connection-1",
+      { directory: "/workspace", workspaceID: "other" },
+      "sh_test",
+    ),
+    openCodeQueryKeys.messages("connection-1", { directory: "/workspace" }, "ses_test", {}),
+  ];
+  for (const key of [affected, ...unaffected]) queryClient.setQueryData(key, {});
+
+  for (const [index, type] of ["shell.created", "shell.exited", "shell.deleted"].entries()) {
+    bridge.apply({
+      created: index + 1,
+      data: { id: "sh_test", status: "exited" },
+      id: `event-shell-${index}`,
+      location: { directory: "/workspace" },
+      type,
+    } as unknown as OpenCodeEvent);
+  }
+
+  expect(scheduled).toHaveLength(1);
+  scheduled[0]?.();
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  expect(queryClient.getQueryState(affected)?.isInvalidated).toBe(true);
+  for (const key of unaffected) expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+  queryClient.clear();
+});
+
+test("invalidates VCS information only for the affected location", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const affectedKey = openCodeQueryKeys.vcs("connection-1", { directory: "/workspace" });
+  const otherKey = openCodeQueryKeys.vcs("connection-1", { directory: "/other" });
+  queryClient.setQueryData(affectedKey, { data: { branch: { current: "old" } } });
+  queryClient.setQueryData(otherKey, { data: { branch: { current: "other" } } });
+
+  bridge.apply({
+    created: 1,
+    data: { branch: "feature/mobile" },
+    id: "event-vcs",
+    location: { directory: "/workspace" },
+    type: "vcs.branch.updated",
+  });
+
+  const predicate = invalidate.mock.calls[0]?.[0]?.predicate;
+  const affected = queryClient.getQueryCache().find({ queryKey: affectedKey });
+  const other = queryClient.getQueryCache().find({ queryKey: otherKey });
+  expect(affected && predicate?.(affected)).toBe(true);
+  expect(other && predicate?.(other)).toBe(false);
+  queryClient.clear();
+});
+
+test("project updates replace the cached project or refetch only the project list", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const projectsKey = openCodeQueryKeys.projects("connection-1");
+  const project = {
+    canonical: "/workspace",
+    id: "project-1",
+    sandboxes: [],
+    time: { created: 1, updated: 1 },
+  };
+  const other = { ...project, canonical: "/other", id: "project-2" };
+  queryClient.setQueryData(projectsKey, [project, other]);
+  const updated = { ...project, icon: { color: "pink" }, time: { created: 1, updated: 2 } };
+  const event = (data: unknown, id: string) =>
+    ({ created: 2, data, id, type: "project.updated" }) as unknown as OpenCodeEvent;
+
+  bridge.apply(event(updated, "event-project-1"));
+  bridge.apply(event(updated, "event-project-1"));
+
+  expect(queryClient.getQueryData(projectsKey)).toEqual([updated, other]);
+  expect(invalidate).not.toHaveBeenCalled();
+
+  bridge.apply(event({ ...project, canonical: "/new", id: "project-3" }, "event-project-2"));
+  bridge.apply(event({ id: "project-1" }, "event-project-3"));
+
+  expect(invalidate).toHaveBeenCalledTimes(2);
+  for (const [filters] of invalidate.mock.calls) {
+    expect(filters).toEqual({ exact: true, queryKey: projectsKey });
+  }
+  queryClient.clear();
+});
+
+test("falls back to connection reconciliation for an unknown session event", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+
+  bridge.apply({
+    created: 1,
+    data: { sessionID: "session-1" },
+    id: "event-future",
+    type: "session.future-state",
+  } as unknown as OpenCodeEvent);
+
+  expect(invalidate).toHaveBeenCalledWith({
+    queryKey: openCodeQueryKeys.connection("connection-1"),
+  });
+  queryClient.clear();
+});
+
+test("invalidates only the affected session inbox for inbox events", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const location = { directory: "/workspace" };
+  const affectedKey = openCodeQueryKeys.inbox("connection-1", location, "session-1");
+  const otherKey = openCodeQueryKeys.inbox("connection-1", location, "session-2");
+  queryClient.setQueryData(affectedKey, []);
+  queryClient.setQueryData(otherKey, []);
+
+  bridge.apply({
+    created: 1,
+    data: { inboxID: "msg_1", sessionID: "session-1" },
+    durable: { aggregateID: "session-1", seq: 1, version: 1 },
+    id: "event-inbox",
+    location,
+    type: "session.inbox.delivered",
+  });
+
+  const predicate = invalidate.mock.calls[0]?.[0]?.predicate;
+  const affected = queryClient.getQueryCache().find({ queryKey: affectedKey });
+  const other = queryClient.getQueryCache().find({ queryKey: otherKey });
+  expect(affected && predicate?.(affected)).toBe(true);
+  expect(other && predicate?.(other)).toBe(false);
+  queryClient.clear();
+});
+
+test.each([true, false])(
+  "projects permission requests while scheduling REST reconciliation, existing cache: %s",
+  (cached) => {
+    const queryClient = new QueryClient();
+    const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+    const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+      callback(),
+    );
+    const location = { directory: "/workspace" };
+    const key = openCodeQueryKeys.permissions("connection-1", location);
+    if (cached) queryClient.setQueryData(key, { data: [], location });
+
+    bridge.apply({
+      created: 1,
+      data: {
+        action: "shell",
+        id: "per_test",
+        resources: ["redacted command"],
+        sessionID: "session-1",
+      },
+      id: "event-permission",
+      location,
+      type: "permission.asked",
+    });
+
+    expect(queryClient.getQueryData(key)).toEqual({
+      data: [
+        {
+          action: "shell",
+          id: "per_test",
+          resources: ["redacted command"],
+          sessionID: "session-1",
+        },
+      ],
+      location,
+    });
+    const query = queryClient.getQueryCache().find({ queryKey: key });
+    expect(query && invalidate.mock.calls[0]?.[0]?.predicate?.(query)).toBe(true);
+
+    bridge.apply({
+      created: 2,
+      data: { reply: "once", requestID: "per_test", sessionID: "session-1" },
+      id: "event-permission-replied",
+      location,
+      type: "permission.replied",
+    });
+    expect(queryClient.getQueryData(key)).toEqual({ data: [], location });
+    queryClient.clear();
+  },
+);
+
+test("fresh form hints protect cold locations until authoritative reconciliation", () => {
+  const queryClient = new QueryClient();
+  const location = { directory: "/workspace/retired" };
+  const key = openCodeQueryKeys.forms("connection-1", location);
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (flush) => flush());
+  const event = {
+    type: "form.created",
+    id: "event-form",
+    created: 1,
+    location,
+    data: {
+      form: {
+        id: "form_test",
+        sessionID: "ses_test",
+        title: "Input",
+        fields: [{ key: "answer", type: "string" }],
+      },
+    },
+  } satisfies OpenCodeEvent;
+  bridge.apply(event);
+  bridge.apply(event);
+  expect(queryClient.getQueryData(key)).toEqual({ data: [event.data.form], location });
+  expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  expect(
+    queryClient.getQueryData(openCodeQueryKeys.forms("connection-2", location)),
+  ).toBeUndefined();
+  queryClient.setQueryData(key, { data: [], location });
+  expect(queryClient.getQueryData(key)).toEqual({ data: [], location });
+  queryClient.clear();
+});
+
+test("coalesces transcript events into one cache write per frame", () => {
+  const queryClient = new QueryClient();
+  const scheduled: Array<() => void> = [];
+  const onTranscriptFrame = jest.fn();
+  const bridge = new ConnectionEventQueryBridge(
+    queryClient,
+    "connection-1",
+    (callback) => {
+      scheduled.push(callback);
+    },
+    onTranscriptFrame,
+  );
+  const key = openCodeQueryKeys.messages("connection-1", { directory: "/workspace" }, "session-1", {
+    limit: 40,
+    order: "desc",
+  });
+  queryClient.setQueryData(key, {
+    pageParams: [undefined],
+    pages: [{ cursor: {}, data: [] }],
+  });
+  const setQueryData = jest.spyOn(queryClient, "setQueryData");
+  const delta = transcriptEvent("event-3", "session.text.delta", {
+    assistantMessageID: "msg_assistant",
+    delta: "x",
+    ordinal: 0,
+    sessionID: "session-1",
+  });
+
+  bridge.apply(
+    transcriptEvent("event-1", "session.step.started", {
+      agent: "build",
+      assistantMessageID: "msg_assistant",
+      model: { id: "model-1", providerID: "provider-1" },
+      sessionID: "session-1",
+    }),
+  );
+  bridge.apply(
+    transcriptEvent("event-2", "session.text.started", {
+      assistantMessageID: "msg_assistant",
+      ordinal: 0,
+      sessionID: "session-1",
+    }),
+  );
+  bridge.apply(delta);
+  bridge.apply(delta);
+
+  expect(scheduled).toHaveLength(1);
+  expect(setQueryData).not.toHaveBeenCalled();
+  scheduled[0]?.();
+  expect(setQueryData).toHaveBeenCalledTimes(1);
+  expect(onTranscriptFrame).toHaveBeenCalledWith({
+    cacheWrites: 1,
+    durationMs: expect.any(Number),
+    eventCount: 3,
+    reconciliations: 0,
+  });
+  expect(queryClient.getQueryData(key)).toMatchObject({
+    pages: [
+      {
+        data: [
+          {
+            content: [{ text: "x", type: "text" }],
+            id: "msg_assistant",
+            type: "assistant",
+          },
+        ],
+      },
+    ],
+  });
+  queryClient.clear();
+});
+
+test.each([
+  { snapshot: "Hello world", label: "includes some held deltas" },
+  { snapshot: "Hello", label: "includes none of the held deltas" },
+])(
+  "holds deltas during a transcript refetch and keeps the ones it $label",
+  async ({ snapshot }) => {
+    const queryClient = new QueryClient();
+    const scheduled: Array<() => void> = [];
+    const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) => {
+      scheduled.push(callback);
+    });
+    const key = openCodeQueryKeys.messages(
+      "connection-1",
+      { directory: "/workspace" },
+      "session-1",
+      {
+        limit: 40,
+        order: "desc",
+      },
+    );
+    const transcript = (text: string) => ({
+      pageParams: [undefined],
+      pages: [
+        {
+          cursor: {},
+          data: [
+            {
+              agent: "build",
+              content: [{ text, type: "text" }],
+              id: "msg_assistant",
+              model: { id: "model-1", providerID: "provider-1" },
+              time: { created: 1 },
+              type: "assistant",
+            },
+          ],
+        },
+      ],
+    });
+    queryClient.setQueryData(key, transcript("Hello"));
+    // This event stream saw the part start, so its deltas are continuous.
+    bridge.apply(
+      transcriptEvent("event-start", "session.text.started", {
+        assistantMessageID: "msg_assistant",
+        ordinal: 0,
+        sessionID: "session-1",
+      }),
+    );
+    scheduled.shift()?.();
+    let resolve: (value: unknown) => void = () => {};
+    const refetch = queryClient.fetchQuery({
+      queryFn: () => new Promise((done) => (resolve = done)),
+      queryKey: key,
+    });
+    const text = () =>
+      (
+        queryClient.getQueryData(key) as {
+          pages: Array<{ data: Array<{ content: Array<{ text: string }> }> }>;
+        }
+      ).pages[0]?.data[0]?.content[0]?.text;
+
+    for (const [index, delta] of [" wor", "ld", "!"].entries()) {
+      bridge.apply(
+        transcriptEvent(`event-${index}`, "session.text.delta", {
+          assistantMessageID: "msg_assistant",
+          delta,
+          ordinal: 0,
+          sessionID: "session-1",
+        }),
+      );
+    }
+    scheduled.shift()?.();
+    // Appending now would be lost when the refetch replaces this text.
+    expect(text()).toBe("Hello");
+
+    resolve(transcript(snapshot));
+    await refetch;
+    while (scheduled.length > 0) scheduled.shift()?.();
+    expect(text()).toBe("Hello world!");
+    queryClient.clear();
+  },
+);
+
+function assistantTranscript(text: string) {
+  return {
+    pageParams: [undefined],
+    pages: [
+      {
+        cursor: {},
+        data: [
+          {
+            agent: "build",
+            content: [{ text, type: "text" }],
+            id: "msg_assistant",
+            model: { id: "model-1", providerID: "provider-1" },
+            time: { created: 1 },
+            type: "assistant",
+          },
+        ],
+      },
+    ],
+  };
+}
+
+function textEvent(id: string, type: string, extra: Record<string, unknown> = {}) {
+  return transcriptEvent(id, type, {
+    assistantMessageID: "msg_assistant",
+    ordinal: 0,
+    sessionID: "session-1",
+    ...extra,
+  });
+}
+
+function cachedText(queryClient: QueryClient, key: readonly unknown[]) {
+  return (
+    queryClient.getQueryData(key) as {
+      pages: Array<{ data: Array<{ content: Array<{ text: string }> }> }>;
+    }
+  ).pages[0]?.data[0]?.content[0]?.text;
+}
+
+test("never stitches deltas onto text from before a stream gap", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const key = openCodeQueryKeys.messages("connection-1", { directory: "/workspace" }, "session-1", {
+    limit: 40,
+    order: "desc",
+  });
+  queryClient.setQueryData(key, assistantTranscript(""));
+  bridge.apply(textEvent("event-1", "session.text.started"));
+  bridge.apply(textEvent("event-2", "session.text.delta", { delta: "Before the app left. " }));
+  expect(cachedText(queryClient, key)).toBe("Before the app left. ");
+
+  // The app returns: deltas sent meanwhile are gone, so later ones would leave a hole.
+  bridge.streamRestarted();
+  bridge.apply(textEvent("event-3", "session.text.delta", { delta: "``\n\n## Six" }));
+  expect(cachedText(queryClient, key)).toBe("Before the app left. ");
+  // It asks once whether the server's transcript has the missing text.
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  bridge.apply(textEvent("event-4", "session.text.delta", { delta: " more" }));
+  expect(invalidate).toHaveBeenCalledTimes(1);
+
+  bridge.apply(textEvent("event-5", "session.text.ended", { text: "The complete reply." }));
+  expect(cachedText(queryClient, key)).toBe("The complete reply.");
+  queryClient.clear();
+});
+
+test("a refetch that ends where held deltas begin restores live streaming", async () => {
+  const queryClient = new QueryClient();
+  const scheduled: Array<() => void> = [];
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) => {
+    scheduled.push(callback);
+  });
+  const key = openCodeQueryKeys.messages("connection-1", { directory: "/workspace" }, "session-1", {
+    limit: 40,
+    order: "desc",
+  });
+  queryClient.setQueryData(key, assistantTranscript("Stale"));
+  bridge.streamRestarted();
+  let resolve: (value: unknown) => void = () => {};
+  const refetch = queryClient.fetchQuery({
+    queryFn: () => new Promise((done) => (resolve = done)),
+    queryKey: key,
+  });
+  bridge.apply(textEvent("event-1", "session.text.delta", { delta: " world" }));
+  bridge.apply(textEvent("event-2", "session.text.delta", { delta: "!" }));
+  scheduled.shift()?.();
+  resolve(assistantTranscript("Hello world"));
+  await refetch;
+  while (scheduled.length > 0) scheduled.shift()?.();
+  expect(cachedText(queryClient, key)).toBe("Hello world!");
+
+  bridge.apply(textEvent("event-3", "session.text.delta", { delta: " Again" }));
+  while (scheduled.length > 0) scheduled.shift()?.();
+  expect(cachedText(queryClient, key)).toBe("Hello world! Again");
+  queryClient.clear();
+});
+
+test("invalidates only the affected transcript when reduction finds a gap", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const affectedKey = openCodeQueryKeys.messages(
+    "connection-1",
+    { directory: "/workspace" },
+    "session-1",
+    { limit: 40, order: "desc" },
+  );
+  const otherKey = openCodeQueryKeys.messages(
+    "connection-1",
+    { directory: "/workspace" },
+    "session-2",
+    { limit: 40, order: "desc" },
+  );
+  const data = {
+    pageParams: [undefined],
+    pages: [{ cursor: {}, data: [] }],
+  };
+  queryClient.setQueryData(affectedKey, data);
+  queryClient.setQueryData(otherKey, data);
+
+  bridge.apply(
+    transcriptEvent("event-gap", "session.text.started", {
+      assistantMessageID: "msg_missing",
+      ordinal: 0,
+      sessionID: "session-1",
+    }),
+  );
+
+  const predicate = invalidate.mock.calls[0]?.[0]?.predicate;
+  const affected = queryClient.getQueryCache().find({ queryKey: affectedKey });
+  const other = queryClient.getQueryCache().find({ queryKey: otherKey });
+  expect(affected && predicate?.(affected)).toBe(true);
+  expect(other && predicate?.(other)).toBe(false);
+  queryClient.clear();
+});
+
+test("limits location events to matching location queries", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const firstKey = openCodeQueryKeys.sessions("connection-1", { directory: "/first" }, {});
+  const secondKey = openCodeQueryKeys.sessions("connection-1", { directory: "/second" }, {});
+  queryClient.setQueryData(firstKey, []);
+  queryClient.setQueryData(secondKey, []);
+
+  bridge.apply({ ...sessionRenamedEvent("event-1"), location: { directory: "/first" } });
+
+  const predicate = invalidate.mock.calls[0]?.[0]?.predicate;
+  const first = queryClient.getQueryCache().find({ queryKey: firstKey });
+  const second = queryClient.getQueryCache().find({ queryKey: secondKey });
+  expect(first && predicate?.(first)).toBe(true);
+  expect(second && predicate?.(second)).toBe(false);
+  queryClient.clear();
+});
+
+test.each([
+  "session.archived",
+  "session.unarchived",
+  "session.viewed",
+  // A new run's start time shows as the working duration.
+  "session.execution.started",
+])("%s refreshes only the session lists", (type) => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const followedKey = openCodeQueryKeys.followedProjectSessions(
+    "connection-1",
+    ["project-1"],
+    { archived: true, limit: 50, order: "desc", parentID: null },
+    0,
+  );
+  const permissionsKey = openCodeQueryKeys.permissions("connection-1", { directory: "/first" });
+  queryClient.setQueryData(followedKey, { cursors: {}, failures: [], responses: {} });
+  queryClient.setQueryData(permissionsKey, { data: [], location: { directory: "/first" } });
+
+  bridge.apply({
+    created: 1,
+    data: { sessionID: "session-1", ...(type === "session.viewed" ? { idle: 2 } : {}) },
+    durable: { aggregateID: "session-1", seq: 1, version: 1 as const },
+    id: `event-${type}`,
+    location: { directory: "/first" },
+    type,
+  } as unknown as OpenCodeEvent);
+
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  const predicate = invalidate.mock.calls[0]?.[0]?.predicate;
+  const followed = queryClient.getQueryCache().find({ queryKey: followedKey });
+  const permissions = queryClient.getQueryCache().find({ queryKey: permissionsKey });
+  expect(followed && predicate?.(followed)).toBe(true);
+  expect(permissions && predicate?.(permissions)).toBe(false);
+  queryClient.clear();
+});
+
+test("reconciles the whole connection when the stream is uncertain without an event", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const scheduled: Array<() => void> = [];
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) => {
+    scheduled.push(callback);
+  });
+
+  bridge.uncertain();
+  bridge.uncertain();
+
+  expect(scheduled).toHaveLength(1);
+  expect(invalidate).not.toHaveBeenCalled();
+  scheduled[0]?.();
+  expect(invalidate.mock.calls).toEqual([
+    [{ queryKey: openCodeQueryKeys.connection("connection-1") }],
+  ]);
+  queryClient.clear();
+});
+
+test("reconciles the whole connection for an uncertain event without its own root", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+
+  bridge.uncertain(
+    transcriptEvent("event-delta", "session.text.delta", {
+      assistantMessageID: "message-1",
+      delta: "x",
+      ordinal: 0,
+      sessionID: "session-1",
+    }),
+  );
+  bridge.uncertain({
+    created: 1,
+    data: {},
+    id: "event-future",
+    location: { directory: "/workspace" },
+    type: "future.updated",
+  } as unknown as OpenCodeEvent);
+
+  expect(invalidate.mock.calls).toEqual([
+    [{ queryKey: openCodeQueryKeys.connection("connection-1") }],
+    [{ queryKey: openCodeQueryKeys.connection("connection-1") }],
+  ]);
+  queryClient.clear();
+});
+
+test("limits an uncertain location event to its root at that location", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const affectedKey = openCodeQueryKeys.vcs("connection-1", { directory: "/workspace" });
+  const unaffected = [
+    openCodeQueryKeys.vcs("connection-1", { directory: "/other" }),
+    openCodeQueryKeys.vcs("connection-2", { directory: "/workspace" }),
+    openCodeQueryKeys.messages("connection-1", { directory: "/workspace" }, "session-1", {}),
+  ];
+  for (const key of [affectedKey, ...unaffected]) queryClient.setQueryData(key, {});
+
+  bridge.uncertain({
+    created: 1,
+    data: { branch: "feature/mobile", sessionID: "session-1" },
+    id: "event-vcs",
+    location: { directory: "/workspace" },
+    type: "vcs.branch.updated",
+  } as unknown as OpenCodeEvent);
+
+  expect(invalidate).toHaveBeenCalledTimes(1);
+  expect(queryClient.getQueryState(affectedKey)?.isInvalidated).toBe(true);
+  for (const key of unaffected) expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+  queryClient.clear();
+});
+
+test("reconciles the affected transcript for an uncertain message event", () => {
+  const queryClient = new QueryClient();
+  const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+  const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+    callback(),
+  );
+  const affected = [
+    openCodeQueryKeys.messages("connection-1", { directory: "/first" }, "session-1", {}),
+    openCodeQueryKeys.sessions("connection-1", { directory: "/first" }, {}),
+  ];
+  const unaffected = [
+    openCodeQueryKeys.messages("connection-1", { directory: "/second" }, "session-1", {}),
+    openCodeQueryKeys.sessions("connection-1", { directory: "/second" }, {}),
+    openCodeQueryKeys.vcs("connection-1", { directory: "/first" }),
+  ];
+  for (const key of [...affected, ...unaffected]) queryClient.setQueryData(key, []);
+
+  bridge.uncertain(sessionExecutionSucceededEvent("event-1"));
+
+  expect(invalidate).toHaveBeenCalledTimes(2);
+  for (const key of affected) expect(queryClient.getQueryState(key)?.isInvalidated).toBe(true);
+  for (const key of unaffected) expect(queryClient.getQueryState(key)?.isInvalidated).toBe(false);
+  queryClient.clear();
+});
+
+test.each([{}, { sessionID: 1 }])(
+  "does not reconcile a transcript for an uncertain message event without a session (%j)",
+  (data) => {
+    const queryClient = new QueryClient();
+    const invalidate = jest.spyOn(queryClient, "invalidateQueries");
+    const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (callback) =>
+      callback(),
+    );
+    const messageKey = openCodeQueryKeys.messages(
+      "connection-1",
+      { directory: "/first" },
+      "session-1",
+      {},
+    );
+    const sessionsKey = openCodeQueryKeys.sessions("connection-1", { directory: "/first" }, {});
+    queryClient.setQueryData(messageKey, []);
+    queryClient.setQueryData(sessionsKey, []);
+
+    bridge.uncertain({
+      ...sessionExecutionSucceededEvent("event-1"),
+      data,
+    } as unknown as OpenCodeEvent);
+
+    expect(invalidate).toHaveBeenCalledTimes(1);
+    expect(queryClient.getQueryState(sessionsKey)?.isInvalidated).toBe(true);
+    queryClient.clear();
+  },
+);
+
+test.each(["catalog.updated", "plugin.added", "mcp.resources.changed"])(
+  "%s does not restart a healthy event generation",
+  (type) => {
+    expect(
+      eventRequiresConnectionSnapshot({
+        data: {},
+        id: "event-1",
+        type,
+      } as unknown as OpenCodeEvent),
+    ).toBe(false);
+  },
+);
+
+function sessionStatusEvent(id: string, type: "busy" | "idle") {
+  return {
+    created: 1,
+    data: { sessionID: "session-1", status: { type } },
+    id,
+    type: "session.status",
+  } satisfies OpenCodeEvent;
+}
+
+function sessionTextDeltaEvent(id: string) {
+  return {
+    created: 1,
+    data: {
+      assistantMessageID: "message-1",
+      delta: "x",
+      ordinal: 0,
+      sessionID: "session-1",
+    },
+    id,
+    type: "session.text.delta",
+  } satisfies OpenCodeEvent;
+}
+
+function sessionRenamedEvent(id: string) {
+  return {
+    created: 1,
+    data: { sessionID: "session-1", title: "Renamed" },
+    durable: { aggregateID: "session-1", seq: 1, version: 1 as const },
+    id,
+    type: "session.renamed",
+  } satisfies OpenCodeEvent;
+}
+
+function sessionExecutionSucceededEvent(id: string) {
+  return {
+    created: 1,
+    data: { sessionID: "session-1" },
+    durable: { aggregateID: "session-1", seq: 1, version: 1 as const },
+    id,
+    location: { directory: "/first" },
+    type: "session.execution.succeeded",
+  } satisfies OpenCodeEvent;
+}
+
+function messageReconciliationEvent(
+  type: "session.step.streamed" | "session.message.content.updated",
+) {
+  return {
+    created: 1,
+    data:
+      type === "session.step.streamed"
+        ? { assistantMessageID: "message-1", sessionID: "session-1" }
+        : { content: [], messageID: "message-1", sessionID: "session-1" },
+    durable: { aggregateID: "session-1", seq: 1, version: 1 as const },
+    id: `event-${type}`,
+    location: { directory: "/workspace" },
+    type,
+  } as OpenCodeEvent;
+}
+
+function transcriptEvent(id: string, type: string, data: Record<string, unknown>) {
+  return {
+    created: 1,
+    data,
+    id,
+    location: { directory: "/workspace" },
+    type,
+  } as unknown as OpenCodeEvent;
+}

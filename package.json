@@ -1,0 +1,37 @@
+{
+  "name": "opencode2-mobile",
+  "private": true,
+  "license": "MIT",
+  "packageManager": "pnpm@11.21.0",
+  "engines": {
+    "node": "26.7.0"
+  },
+  "scripts": {
+    "android": "pnpm --filter @opencode2-mobile/mobile android",
+    "build": "pnpm -r --if-present build",
+    "check": "pnpm lint && pnpm typecheck && pnpm test && pnpm build",
+    "check:public": "node scripts/check-public-tree.mjs",
+    "coverage": "rm -rf coverage && mkdir coverage && node --test --experimental-test-coverage --test-reporter=spec --test-reporter-destination=stdout --test-reporter=lcov --test-reporter-destination=coverage/lcov.info scripts/*.test.mjs && pnpm -r --if-present coverage && pnpm --filter @opencode2-mobile/mobile exec jest --runInBand --coverage --coverageReporters=lcovonly --coverageDirectory=../../coverage/apps/mobile",
+    "crap": "bash scripts/crap.sh",
+    "dev": "pnpm go:tailscale",
+    "dev:client": "pnpm --filter @opencode2-mobile/mobile start",
+    "format": "biome format --write .",
+    "go": "pnpm --filter @opencode2-mobile/mobile go",
+    "go:tailscale": "pnpm --filter @opencode2-mobile/mobile go:tailscale",
+    "ios": "pnpm --filter @opencode2-mobile/mobile ios",
+    "lint": "biome check .",
+    "native:doctor": "pnpm --filter @opencode2-mobile/mobile run doctor",
+    "mobile:runtime": "node scripts/mobile-runtime.mjs",
+    "notifications:build": "pnpm --filter @opencode2-mobile/notification-protocol build && pnpm --filter @opencode2-mobile/notification-broker build && pnpm --filter @opencode2-mobile/opencode-notification-plugin build",
+    "notifications:broker": "node apps/notification-broker/dist/cli.js",
+    "notifications:smoke": "node scripts/notification-plugin-smoke.mjs",
+    "test": "node --test scripts/*.test.mjs && pnpm -r --if-present test",
+    "typecheck": "pnpm -r typecheck",
+    "build:packages": "pnpm --filter './packages/*' build"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "2.5.8",
+    "typescript": "7.0.2",
+    "vitest": "4.1.10"
+  }
+}

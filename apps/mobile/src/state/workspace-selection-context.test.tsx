@@ -1,0 +1,1222 @@
+import { afterEach, beforeEach, expect, jest, test } from "@jest/globals";
+import type {
+  FormInfo,
+  LocationRef,
+  PermissionReply,
+  PermissionRequest,
+} from "@opencode2-mobile/opencode-adapter";
+import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react-native";
+import { Pressable, Text } from "react-native";
+import type { SessionInboxPreferences } from "../storage/session-inbox-repository";
+import { ConnectionEventQueryBridge } from "./connection-event-query-bridge";
+import { FollowedProjectsProvider, useFollowedProjects } from "./followed-projects-context";
+import { openCodeQueryKeys } from "./open-code-query-keys";
+
+type InteractionOutput<T> = { data: T[]; location: ReturnType<typeof mockResolvedLocation> };
+type ListFormsCall = (
+  client: unknown,
+  location: LocationRef,
+  options?: { signal?: AbortSignal },
+) => Promise<InteractionOutput<FormInfo>>;
+type ListPermissionsCall = (
+  client: unknown,
+  location: LocationRef,
+  options?: { signal?: AbortSignal },
+) => Promise<InteractionOutput<PermissionRequest>>;
+type ReplyPermissionCall = (
+  client: unknown,
+  sessionID: string,
+  requestID: string,
+  reply: PermissionReply,
+) => Promise<unknown>;
+
+const mockListForms = jest.fn<ListFormsCall>();
+const mockDirectoryExists = jest.fn(
+  async (
+    _client: unknown,
+    _root: LocationRef,
+    _directory: string,
+    _options?: { signal?: AbortSignal },
+  ) => true,
+);
+const mockListPermissions = jest.fn<ListPermissionsCall>();
+const mockGetOpenCodeLocation = jest.fn(async (_client: unknown, location: { directory: string }) =>
+  mockResolvedLocation(
+    location.directory,
+    location.directory.startsWith("/b") ? "project-b" : "project-a",
+  ),
+);
+type ListProjectSessionsCall = (
+  client: unknown,
+  projectID: string,
+  input: { archived?: boolean; search?: string },
+  options?: { signal?: AbortSignal },
+) => Promise<{ cursor: { next?: string }; data: ReturnType<typeof mockSession>[] }>;
+const defaultListProjectSessions: ListProjectSessionsCall = async (_client, projectID) => ({
+  cursor: {},
+  data: [
+    projectID === "project-a"
+      ? mockSession("ses_alpha", projectID, "/a", 3)
+      : mockSession("ses_beta", projectID, "/b/sub", 2),
+  ],
+});
+const mockListProjectSessions = jest.fn<ListProjectSessionsCall>(defaultListProjectSessions);
+const mockReplyPermission = jest.fn<ReplyPermissionCall>();
+const mockArchiveSession = jest.fn(async (..._args: unknown[]) => undefined);
+let mockEventLocations: LocationRef[] = [];
+let mockAttentionLocations: LocationRef[] = [];
+let mockSandboxes: string[] = [];
+let mockRevision = 1;
+let mockStatus: "connected" | "offline" = "connected";
+let mockConnectionUpdatedAtMs = 1;
+const mockTransaction = {
+  getFirstAsync: jest.fn(async () => ({ updated_at_ms: mockConnectionUpdatedAtMs })),
+  runAsync: jest.fn(async () => undefined),
+};
+const mockDb = {
+  getAllAsync: jest.fn(async () => [{ project_id: "project-a" }, { project_id: "project-b" }]),
+  getFirstAsync: jest.fn<() => Promise<{ connection_id: string } | null>>(async () => ({
+    connection_id: "connection-1",
+  })),
+  withExclusiveTransactionAsync: jest.fn(
+    async (task: (transaction: typeof mockTransaction) => Promise<void>) => task(mockTransaction),
+  ),
+};
+
+jest.mock("expo-sqlite", () => ({ useSQLiteContext: () => mockDb }));
+// The inbox started before every fixture session finished.
+jest.mock("../storage/session-inbox-repository", () => ({
+  startSessionInbox: jest.fn(async () => ({
+    archivedExpanded: true,
+    sinceMs: 0,
+    workingExpanded: true,
+  })),
+  writeInboxSectionExpanded: jest.fn(async () => undefined),
+}));
+jest.mock("@opencode2-mobile/opencode-adapter", () => ({
+  archiveOpenCodeSession: (...args: unknown[]) => mockArchiveSession(...args),
+  openCodeDirectoryExists: (...args: Parameters<typeof mockDirectoryExists>) =>
+    mockDirectoryExists(...args),
+  getDefaultOpenCodeLocation: jest.fn(async () => mockResolvedLocation("/a", "project-a")),
+  getOpenCodeLocation: (...args: Parameters<typeof mockGetOpenCodeLocation>) =>
+    mockGetOpenCodeLocation(...args),
+  getOpenCodeSession: jest.fn(async (_client: unknown, sessionID: string) => {
+    if (sessionID === "ses_child") {
+      return { ...mockSession("ses_child", "project-a", "/a", 4), parentID: "ses_alpha" };
+    }
+    return mockSession(sessionID, "project-a", "/a", 3);
+  }),
+  listActiveOpenCodeSessions: jest.fn(async () => ({ ses_child: { type: "running" } })),
+  listOpenCodeFormRequests: (...args: Parameters<ListFormsCall>) => mockListForms(...args),
+  listOpenCodePermissionRequests: (...args: Parameters<ListPermissionsCall>) =>
+    mockListPermissions(...args),
+  listOpenCodeProjects: jest.fn(async () => [
+    {
+      canonical: "/a",
+      id: "project-a",
+      name: "Alpha",
+      sandboxes: [],
+      time: { created: 1, updated: 1 },
+    },
+    {
+      canonical: "/b",
+      id: "project-b",
+      name: "Beta",
+      sandboxes: mockSandboxes,
+      time: { created: 1, updated: 1 },
+    },
+  ]),
+  listOpenCodeProjectSessions: (...args: Parameters<typeof mockListProjectSessions>) =>
+    mockListProjectSessions(...args),
+  replyOpenCodePermissionRequest: (...args: Parameters<ReplyPermissionCall>) =>
+    mockReplyPermission(...args),
+}));
+jest.mock("./connection-runtime-context", () => ({
+  useConnectionRuntime: () => ({
+    attentionLocations: mockAttentionLocations,
+    connectionId: "connection-1",
+    connectionUpdatedAtMs: mockConnectionUpdatedAtMs,
+    eventLocations: mockEventLocations,
+    reconciliationRevision: mockRevision,
+    restClient: {},
+    status: mockStatus,
+  }),
+}));
+
+beforeEach(() => {
+  mockDirectoryExists.mockReset();
+  mockDirectoryExists.mockResolvedValue(true);
+  jest.useFakeTimers();
+  mockEventLocations = [];
+  mockAttentionLocations = [];
+  mockSandboxes = [];
+  mockRevision = 1;
+  mockStatus = "connected";
+  mockConnectionUpdatedAtMs = 1;
+  mockDb.getAllAsync.mockImplementation(async () => [
+    { project_id: "project-a" },
+    { project_id: "project-b" },
+  ]);
+  mockDb.getFirstAsync.mockImplementation(async () => ({ connection_id: "connection-1" }));
+  mockDb.withExclusiveTransactionAsync.mockImplementation(
+    async (task: (transaction: typeof mockTransaction) => Promise<void>) => task(mockTransaction),
+  );
+  mockDb.withExclusiveTransactionAsync.mockClear();
+  mockTransaction.getFirstAsync.mockImplementation(async () => ({
+    updated_at_ms: mockConnectionUpdatedAtMs,
+  }));
+  mockTransaction.runAsync.mockClear();
+  mockListProjectSessions.mockReset();
+  mockListProjectSessions.mockImplementation(defaultListProjectSessions);
+  mockListForms.mockReset();
+  mockListPermissions.mockReset();
+  mockGetOpenCodeLocation.mockReset();
+  mockGetOpenCodeLocation.mockImplementation(async (_client, location) =>
+    mockResolvedLocation(
+      location.directory,
+      location.directory.startsWith("/b") ? "project-b" : "project-a",
+    ),
+  );
+  mockReplyPermission.mockReset();
+  mockReplyPermission.mockResolvedValue(undefined);
+  mockListPermissions.mockImplementation(async (_client, location) => ({
+    data:
+      location.directory === "/a"
+        ? [{ action: "shell", id: "per_child", resources: [], sessionID: "ses_child" }]
+        : [],
+    location: mockResolvedLocation(
+      location.directory,
+      location.directory.startsWith("/b") ? "project-b" : "project-a",
+    ),
+  }));
+  mockListForms.mockImplementation(async (_client, location) => ({
+    data:
+      location.directory === "/b/sub"
+        ? [
+            {
+              fields: [{ key: "answer", type: "string" as const }],
+              id: "form_beta",
+              sessionID: "ses_beta",
+              title: "Input",
+            },
+          ]
+        : [],
+    location: mockResolvedLocation(
+      location.directory,
+      location.directory.startsWith("/b") ? "project-b" : "project-a",
+    ),
+  }));
+});
+
+afterEach(() => {
+  jest.clearAllTimers();
+  jest.useRealTimers();
+});
+
+test("aggregates exact followed-project locations and bubbles child attention", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  expect(screen.getByText("Alpha:ses_child:1:1")).toBeOnTheScreen();
+  expect(screen.getByText("Beta:ses_beta:0:1")).toBeOnTheScreen();
+  expect(mockListPermissions.mock.calls.map((call) => call[1].directory).sort()).toEqual([
+    "/a",
+    "/b",
+    "/b/sub",
+  ]);
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("does not treat normal session pagination as failed attention coverage", async () => {
+  mockListProjectSessions.mockImplementation(async (_client, projectID) => ({
+    cursor: { next: "older" },
+    data: [
+      projectID === "project-a"
+        ? mockSession("ses_alpha", projectID, "/a", 3)
+        : mockSession("ses_beta", projectID, "/b/sub", 2),
+    ],
+  }));
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  view.unmount();
+  queryClient.clear();
+});
+
+test("keeps permission replies attached to the request's exact location", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  await screen.findByRole("button", { name: "Allow once" });
+  fireEvent.press(screen.getByRole("button", { name: "Allow once" }));
+  await waitFor(() =>
+    expect(mockReplyPermission).toHaveBeenCalledWith(
+      expect.anything(),
+      "ses_child",
+      "per_child",
+      "once",
+    ),
+  );
+  await waitFor(() => expect(queryClient.isMutating()).toBe(0));
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("starts a fresh reconciliation revision and includes event locations", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const renderTree = () => (
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>
+  );
+  const view = render(renderTree());
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  expect(activeListCalls()).toBe(2);
+  // Each followed project also loads its archived roots once per revision.
+  expect(mockListProjectSessions.mock.calls.filter((call) => call[2].archived)).toHaveLength(2);
+
+  mockRevision = 2;
+  mockEventLocations = [{ directory: "/a/event" }];
+  view.rerender(renderTree());
+
+  await waitFor(() => expect(activeListCalls()).toBe(4));
+  await waitFor(() =>
+    expect(mockListPermissions.mock.calls.some((call) => call[1].directory === "/a/event")).toBe(
+      true,
+    ),
+  );
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("keeps the inbox populated while a new reconciliation revision loads", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const renderTree = () => (
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>
+  );
+  const view = render(renderTree());
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  expect(screen.getByText("Beta:ses_beta:0:1")).toBeOnTheScreen();
+
+  let releaseSessions: () => void = () => undefined;
+  const sessionsBlocked = new Promise<void>((resolve) => {
+    releaseSessions = resolve;
+  });
+  mockListProjectSessions.mockImplementation(async (...args) => {
+    await sessionsBlocked;
+    return defaultListProjectSessions(...args);
+  });
+  mockRevision += 1;
+  view.rerender(renderTree());
+
+  await waitFor(() => expect(activeListCalls()).toBe(4));
+  expect(screen.getByText("freshness:reconciling")).toBeOnTheScreen();
+  expect(screen.getByText("Beta:ses_beta:0:1")).toBeOnTheScreen();
+  expect(screen.getByText("Alpha:ses_child:1:1")).toBeOnTheScreen();
+
+  releaseSessions();
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  expect(screen.getByText("Beta:ses_beta:0:1")).toBeOnTheScreen();
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("keeps a notification-owned global form visible outside followed projects", async () => {
+  mockAttentionLocations = [{ directory: "/outside" }];
+  mockListPermissions.mockImplementation(async (_client, location) => ({
+    data: [],
+    location: mockResolvedLocation(location.directory, "project-outside"),
+  }));
+  mockGetOpenCodeLocation.mockImplementation(async (_client, location) =>
+    mockResolvedLocation(location.directory, "project-outside"),
+  );
+  mockListForms.mockImplementation(async (_client, location) => ({
+    data:
+      location.directory === "/outside"
+        ? [
+            {
+              fields: [{ key: "result", type: "string" as const }],
+              id: "frm_global",
+              sessionID: "global",
+              title: "Notification routing test",
+            },
+          ]
+        : [],
+    location: mockResolvedLocation(location.directory, "project-outside"),
+  }));
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText(/^complete:1:/)).toBeOnTheScreen());
+  expect(mockListForms.mock.calls.some((call) => call[1].directory === "/outside")).toBe(true);
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("keeps blocked work visible through disconnect and foreground reconciliation", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const renderTree = () => (
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>
+  );
+  const view = render(renderTree());
+  await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+  expect(screen.getByText("Alpha:ses_child:1:1")).toBeOnTheScreen();
+
+  mockStatus = "offline";
+  view.rerender(renderTree());
+  expect(screen.getByText("freshness:stale")).toBeOnTheScreen();
+  expect(screen.getByText("Alpha:ses_child:1:1")).toBeOnTheScreen();
+
+  mockStatus = "connected";
+  mockRevision += 1;
+  view.rerender(renderTree());
+  await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+  expect(screen.getByText("Alpha:ses_child:1:1")).toBeOnTheScreen();
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("reloads followed IDs when the same profile points at a replacement server", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const renderTree = () => (
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>
+  );
+  const view = render(renderTree());
+  await waitFor(() => expect(screen.getByText("followed:project-a,project-b")).toBeOnTheScreen());
+
+  mockDb.getAllAsync.mockResolvedValueOnce([]);
+  mockConnectionUpdatedAtMs = 2;
+  view.rerender(renderTree());
+
+  await waitFor(() => expect(screen.getByText("followed:")).toBeOnTheScreen());
+  view.unmount();
+  queryClient.clear();
+});
+
+test("counts a failed permission and form pair as one failed location", async () => {
+  mockListPermissions.mockImplementation(async (_client, location) => {
+    if (location.directory === "/a") throw new Error("offline");
+    return { data: [], location: mockResolvedLocation(location.directory, "project-b") };
+  });
+  mockListForms.mockImplementation(async (_client, location) => {
+    if (location.directory === "/a") throw new Error("offline");
+    return { data: [], location: mockResolvedLocation(location.directory, "project-b") };
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText("locations:1:2")).toBeOnTheScreen());
+  expect(screen.getByText("failed:Alpha:1")).toBeOnTheScreen();
+  view.unmount();
+  queryClient.clear();
+});
+
+test("drops cached locations and attention when a project is unfollowed", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+
+  fireEvent.press(screen.getByRole("button", { name: "Select Alpha location" }));
+  fireEvent.press(screen.getByRole("button", { name: "Follow only Beta" }));
+
+  await waitFor(() => expect(screen.getByText("followed:project-b")).toBeOnTheScreen());
+  await waitFor(() => expect(screen.getByText("complete:1:1:0")).toBeOnTheScreen());
+  expect(screen.queryByText(/^Alpha:/)).not.toBeOnTheScreen();
+  view.unmount();
+  queryClient.clear();
+});
+
+test("contains automatic first-follow persistence failures", async () => {
+  mockDb.getAllAsync.mockResolvedValueOnce([]);
+  mockDb.getFirstAsync.mockResolvedValueOnce(null);
+  mockDb.withExclusiveTransactionAsync.mockRejectedValueOnce(new Error("disk full"));
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  await waitFor(() => expect(screen.getByText("preferences:error")).toBeOnTheScreen());
+  expect(mockDb.withExclusiveTransactionAsync).toHaveBeenCalledTimes(1);
+  view.unmount();
+  queryClient.clear();
+});
+
+test("refreshes the displayed project search instead of the unfiltered feed", async () => {
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(mockListProjectSessions).toHaveBeenCalled());
+  fireEvent.press(screen.getByRole("button", { name: "Search sessions" }));
+  await waitFor(() =>
+    expect(mockListProjectSessions.mock.calls.some((call) => call[2].search === "needle")).toBe(
+      true,
+    ),
+  );
+  mockListProjectSessions.mockClear();
+
+  fireEvent.press(screen.getByRole("button", { name: "Refresh sessions" }));
+
+  await waitFor(() => expect(mockListProjectSessions).toHaveBeenCalled());
+  expect(mockListProjectSessions.mock.calls.some((call) => call[2].search === "needle")).toBe(true);
+  expect(mockListProjectSessions.mock.calls.some((call) => call[2].search === undefined)).toBe(
+    true,
+  );
+  view.unmount();
+  queryClient.clear();
+});
+
+test.each([
+  ["/b/sub", "session-history"],
+  ["/b", "project-root"],
+])("keeps failed %s locations explicit until checks recover", async (directory, source) => {
+  const original = mockListPermissions.getMockImplementation();
+  if (!original) throw new Error("Missing permission fixture");
+  mockListPermissions.mockImplementation(async (client, location, options) => {
+    if (location.directory === directory) throw new Error("HTTP 500 private server details");
+    return original(client, location, options);
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(screen.getByText("locations:1:2")).toBeOnTheScreen());
+  await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+  expect(screen.getByText(`unavailable:Beta:${directory}:${source}:permissions`)).toBeOnTheScreen();
+  expect(screen.getByText("incomplete:2:2:0")).toBeOnTheScreen();
+  expect(screen.getByText("Beta:ses_beta:0:1")).toBeOnTheScreen();
+  mockListPermissions.mockImplementation(original);
+  fireEvent.press(screen.getByRole("button", { name: "Refresh sessions" }));
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  expect(screen.queryByText(/^unavailable:/)).toBeNull();
+  view.unmount();
+  queryClient.clear();
+});
+
+test.each([
+  [false, "/b/.worktree/retired"],
+  [true, "/b/.worktree/retired"],
+  [false, "/external/worktree/project-b/retired"],
+  [true, "/external/worktree/project-b/retired"],
+] satisfies [boolean, string][])(
+  "retires missing directories and checks restoration, registered: %s, directory: %s",
+  async (registered, directory) => {
+    if (registered) mockSandboxes = [directory];
+    const listPermissions = mockListPermissions.getMockImplementation();
+    mockListPermissions.mockImplementation(async (client, location, options) => {
+      if (location.directory === directory) throw new Error("HTTP 500");
+      if (!listPermissions) throw new Error("Missing permission fixture");
+      return listPermissions(client, location, options);
+    });
+    mockListProjectSessions.mockImplementation(async (_client, projectID) => ({
+      cursor: {},
+      data: [
+        projectID === "project-b"
+          ? mockSession("ses_retired", projectID, directory, 2)
+          : mockSession("ses_alpha", projectID, "/a", 3),
+      ],
+    }));
+    mockDirectoryExists.mockImplementation(
+      async (_client, _root, candidate) => candidate !== directory,
+    );
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FollowedProjectsProvider>
+          <Capture />
+        </FollowedProjectsProvider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("complete:1:1:0")).toBeOnTheScreen());
+    expect(screen.queryByText(/^unavailable:/)).toBeNull();
+    expect(mockDirectoryExists).toHaveBeenCalledWith(
+      expect.anything(),
+      { directory: "/b" },
+      directory,
+      expect.anything(),
+    );
+    expect(mockListPermissions.mock.calls.some((call) => call[1].directory === directory)).toBe(
+      false,
+    );
+    expect(mockListForms.mock.calls.some((call) => call[1].directory === directory)).toBe(false);
+    expect(screen.getByText("recent:ses_retired")).toBeOnTheScreen();
+    mockDirectoryExists.mockResolvedValue(true);
+    fireEvent.press(screen.getByRole("button", { name: "Refresh sessions" }));
+    await waitFor(() =>
+      expect(mockListPermissions.mock.calls.some((call) => call[1].directory === directory)).toBe(
+        true,
+      ),
+    );
+    view.unmount();
+    queryClient.clear();
+  },
+);
+
+test("does not resurrect a retired worktree from generic event hints when returning to the project", async () => {
+  const directory = "/b/.worktree/retired";
+  mockListProjectSessions.mockImplementation(async (_client, projectID) => ({
+    cursor: {},
+    data: [
+      projectID === "project-b"
+        ? mockSession("ses_retired", projectID, directory, 2)
+        : mockSession("ses_alpha", projectID, "/a", 3),
+    ],
+  }));
+  mockDirectoryExists.mockImplementation(
+    async (_client, _root, candidate) => candidate !== directory,
+  );
+  const permissions = mockListPermissions.getMockImplementation();
+  mockListPermissions.mockImplementation(async (client, location, options) => {
+    if (location.directory === directory) throw new Error("Location no longer exists");
+    if (!permissions) throw new Error("fixture");
+    return permissions(client, location, options);
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  const tree = () => (
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>
+  );
+  let view = render(tree());
+  try {
+    await waitFor(() => expect(screen.getByText("complete:1:1:0")).toBeOnTheScreen());
+    mockEventLocations = [{ directory }];
+    mockRevision += 1;
+    view.rerender(tree());
+    fireEvent.press(screen.getByRole("button", { name: "Refresh sessions" }));
+    await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+    expect(screen.queryByText(/^unavailable:/)).toBeNull();
+    expect(mockListPermissions.mock.calls.some((call) => call[1].directory === directory)).toBe(
+      false,
+    );
+    expect(mockGetOpenCodeLocation.mock.calls.some((call) => call[1].directory === directory)).toBe(
+      false,
+    );
+    view.unmount();
+    view = render(tree());
+    await waitFor(() => expect(screen.getByText("complete:1:1:0")).toBeOnTheScreen());
+    expect(screen.queryByText(/^unavailable:/)).toBeNull();
+    expect(mockListPermissions.mock.calls.some((call) => call[1].directory === directory)).toBe(
+      false,
+    );
+    expect(mockGetOpenCodeLocation.mock.calls.some((call) => call[1].directory === directory)).toBe(
+      false,
+    );
+  } finally {
+    view.unmount();
+    queryClient.clear();
+  }
+});
+
+test("fresh attention can reopen a retired location and an empty REST snapshot retires it again", async () => {
+  const directory = "/b/.worktree/retired";
+  mockEventLocations = [{ directory }];
+  mockDirectoryExists.mockImplementation(
+    async (_client, _root, candidate) => candidate !== directory,
+  );
+  mockListProjectSessions.mockImplementation(async (_client, projectID) => ({
+    cursor: {},
+    data: [
+      projectID === "project-b"
+        ? mockSession("ses_retired", projectID, directory, 2)
+        : mockSession("ses_alpha", projectID, "/a", 3),
+    ],
+  }));
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  const tree = () => (
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>
+  );
+  const view = render(tree());
+  try {
+    await waitFor(() => expect(screen.getByText("complete:1:1:0")).toBeOnTheScreen());
+    expect(mockListForms.mock.calls.some((call) => call[1].directory === directory)).toBe(false);
+    const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (flush) => flush());
+    bridge.apply({
+      type: "form.created",
+      id: "evt_new",
+      created: 2,
+      location: { directory },
+      data: {
+        form: {
+          id: "form_new",
+          sessionID: "ses_retired",
+          title: "Input",
+          fields: [{ key: "answer", type: "string" }],
+        },
+      },
+    });
+    view.rerender(tree());
+    await waitFor(() =>
+      expect(mockListForms.mock.calls.some((call) => call[1].directory === directory)).toBe(true),
+    );
+    await waitFor(() => expect(screen.getByText("complete:1:1:0")).toBeOnTheScreen());
+    const calls = mockListForms.mock.calls.filter((call) => call[1].directory === directory).length;
+    view.rerender(tree());
+    fireEvent.press(screen.getByRole("button", { name: "Refresh sessions" }));
+    await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+    expect(mockListForms.mock.calls.filter((call) => call[1].directory === directory)).toHaveLength(
+      calls,
+    );
+  } finally {
+    view.unmount();
+    queryClient.clear();
+  }
+});
+
+test.each(["notification", "permission-event", "form-event", "cached-form"])(
+  "keeps %s attention at a missing historical directory",
+  async (source) => {
+    const location = { directory: "/b/sub" };
+    mockDirectoryExists.mockResolvedValue(false);
+    if (source === "notification") mockAttentionLocations = [location];
+    const queryClient = new QueryClient({
+      defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+    });
+    if (source === "permission-event" || source === "form-event") {
+      mockEventLocations = [location];
+      const bridge = new ConnectionEventQueryBridge(queryClient, "connection-1", (flush) =>
+        flush(),
+      );
+      bridge.apply(
+        source === "permission-event"
+          ? {
+              type: "permission.asked",
+              id: "evt_attention",
+              created: 1,
+              location,
+              data: { id: "per_beta", sessionID: "ses_beta", action: "shell", resources: [] },
+            }
+          : {
+              type: "form.created",
+              id: "evt_attention",
+              created: 1,
+              location,
+              data: {
+                form: {
+                  fields: [{ key: "answer", type: "string" }],
+                  id: "form_beta",
+                  sessionID: "ses_beta",
+                  title: "Input",
+                },
+              },
+            },
+      );
+    }
+    if (source === "cached-form") {
+      queryClient.setQueryData(openCodeQueryKeys.forms("connection-1", location), {
+        data: [{ fields: [], id: "form_beta", sessionID: "ses_beta", title: "Input" }],
+        location: mockResolvedLocation(location.directory, "project-b"),
+      });
+    }
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <FollowedProjectsProvider>
+          <Capture />
+        </FollowedProjectsProvider>
+      </QueryClientProvider>,
+    );
+    await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+    expect(mockDirectoryExists.mock.calls.some((call) => call[2] === location.directory)).toBe(
+      false,
+    );
+    expect(mockListForms.mock.calls.some((call) => call[1].directory === location.directory)).toBe(
+      true,
+    );
+    view.unmount();
+    queryClient.clear();
+  },
+);
+
+test("cached attention prevents retirement of an external historical location", async () => {
+  const location = { directory: "/external/worktree/project-b/retired" };
+  mockListProjectSessions.mockImplementation(async (_client, projectID) => ({
+    cursor: {},
+    data: [
+      projectID === "project-b"
+        ? mockSession("ses_beta", projectID, location.directory, 2)
+        : mockSession("ses_alpha", projectID, "/a", 3),
+    ],
+  }));
+  mockDirectoryExists.mockResolvedValue(false);
+  const original = mockListPermissions.getMockImplementation();
+  mockListPermissions.mockImplementation(async (client, candidate, options) => {
+    if (candidate.directory === location.directory) throw new Error("HTTP 500");
+    if (!original) throw new Error("Missing permission fixture");
+    return original(client, candidate, options);
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  queryClient.setQueryData(openCodeQueryKeys.permissions("connection-1", location), {
+    data: [{ action: "shell", id: "per_beta", resources: [], sessionID: "ses_beta" }],
+    location: mockResolvedLocation(location.directory, "project-b"),
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+  try {
+    await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+    await waitFor(() => expect(screen.getByText("incomplete:2:2:0")).toBeOnTheScreen());
+    expect(mockDirectoryExists.mock.calls.some((call) => call[2] === location.directory)).toBe(
+      false,
+    );
+    expect(screen.getByText("Beta:ses_beta:0:1")).toBeOnTheScreen();
+    expect(screen.getByText(/^unavailable:Beta:/)).toBeOnTheScreen();
+  } finally {
+    view.unmount();
+    queryClient.clear();
+  }
+});
+
+test("a selected session location does not keep a removed external worktree unavailable", async () => {
+  const location = { directory: "/external/worktree/project-b/retired" };
+  mockListProjectSessions.mockImplementation(async (_client, projectID) => ({
+    cursor: {},
+    data: [
+      projectID === "project-b"
+        ? mockSession("ses_beta", projectID, location.directory, 2)
+        : mockSession("ses_alpha", projectID, "/a", 3),
+    ],
+  }));
+  mockDirectoryExists.mockImplementation(
+    async (_client, _root, directory) => directory !== location.directory,
+  );
+  const originalPermissions = mockListPermissions.getMockImplementation();
+  mockListPermissions.mockImplementation(async (client, candidate, options) => {
+    if (candidate.directory === location.directory) throw new Error("HTTP 404");
+    if (!originalPermissions) throw new Error("Missing permission fixture");
+    return originalPermissions(client, candidate, options);
+  });
+  mockGetOpenCodeLocation.mockImplementation(async (_client, candidate) => {
+    if (candidate.directory === location.directory) throw new Error("HTTP 404");
+    return mockResolvedLocation(
+      candidate.directory,
+      candidate.directory.startsWith("/b") ? "project-b" : "project-a",
+    );
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  let selectLocation: ((location: LocationRef) => void) | undefined;
+  function SelectRetired() {
+    selectLocation = useFollowedProjects().setLocation;
+    return null;
+  }
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <SelectRetired />
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+  try {
+    await waitFor(() => expect(screen.getByText("freshness:current")).toBeOnTheScreen());
+    act(() => selectLocation?.(location));
+    await waitFor(() =>
+      expect(mockDirectoryExists.mock.calls.some((call) => call[2] === location.directory)).toBe(
+        true,
+      ),
+    );
+    await waitFor(() => expect(screen.getByText(/^complete:/)).toBeOnTheScreen());
+    expect(screen.queryByText(/^unavailable:/)).toBeNull();
+  } finally {
+    view.unmount();
+    queryClient.clear();
+  }
+});
+
+test("an unavailable directory probe does not silently retire a valid session location", async () => {
+  mockDirectoryExists.mockRejectedValue(new Error("HTTP 500"));
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false, gcTime: Infinity } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <Capture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+  await waitFor(() => expect(screen.getByText("complete:2:2:0")).toBeOnTheScreen());
+  expect(mockListForms.mock.calls.some((call) => call[1].directory === "/b/sub")).toBe(true);
+  view.unmount();
+  queryClient.clear();
+});
+
+test("lists archived roots under Archived and moves a row when it is archived", async () => {
+  const archivedAt = new Map<string, number>([["ses_old", 5]]);
+  mockListProjectSessions.mockImplementation(async (_client, projectID, input) => {
+    const sessions =
+      projectID === "project-a"
+        ? [
+            mockSession("ses_alpha", projectID, "/a", 3),
+            mockSession("ses_gamma", projectID, "/a", 2),
+          ]
+        : [mockSession("ses_old", projectID, "/b", 1)];
+    return {
+      cursor: {},
+      data: sessions
+        .map((session) =>
+          archivedAt.has(session.id)
+            ? { ...session, time: { ...session.time, archived: archivedAt.get(session.id) } }
+            : session,
+        )
+        .filter((session) => "archived" in session.time === Boolean(input.archived)),
+    };
+  });
+  mockArchiveSession.mockImplementation(async (_client, sessionID, archived) => {
+    if (archived) archivedAt.set(sessionID as string, 9);
+    else archivedAt.delete(sessionID as string);
+  });
+  const queryClient = new QueryClient({
+    defaultOptions: {
+      mutations: { networkMode: "always" },
+      queries: { gcTime: Infinity, retry: false },
+    },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <ArchiveCapture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  expect(await screen.findByText("recent:ses_gamma")).toBeOnTheScreen();
+  expect(screen.getByText("archived:ses_old")).toBeOnTheScreen();
+  expect(
+    mockListProjectSessions.mock.calls.some(
+      (call) => call[2].archived === true && (call[2] as { limit?: number }).limit === 50,
+    ),
+  ).toBe(true);
+
+  fireEvent.press(screen.getByRole("button", { name: "Archive ses_gamma" }));
+  expect(await screen.findByText("archived:ses_gamma")).toBeOnTheScreen();
+  expect(screen.queryByText("recent:ses_gamma")).toBeNull();
+  expect(mockArchiveSession).toHaveBeenCalledWith({}, "ses_gamma", true);
+
+  fireEvent.press(screen.getByRole("button", { name: "Unarchive ses_old" }));
+  expect(await screen.findByText("recent:ses_old")).toBeOnTheScreen();
+  expect(mockArchiveSession).toHaveBeenLastCalledWith({}, "ses_old", false);
+
+  view.unmount();
+  queryClient.clear();
+});
+
+test("Recent lists only runs that finished since the inbox started", async () => {
+  const { startSessionInbox } = jest.requireMock<{
+    startSessionInbox: jest.Mock<() => Promise<SessionInboxPreferences>>;
+  }>("../storage/session-inbox-repository");
+  startSessionInbox.mockResolvedValueOnce({
+    archivedExpanded: false,
+    sinceMs: 3,
+    workingExpanded: false,
+  });
+  mockListProjectSessions.mockImplementation(async (_client, projectID, input) => ({
+    cursor: {},
+    data:
+      projectID === "project-a" && !input.archived
+        ? [
+            mockSession("ses_new", projectID, "/a", 4),
+            mockSession("ses_before", projectID, "/a", 2),
+          ]
+        : [],
+  }));
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { gcTime: Infinity, retry: false } },
+  });
+  const view = render(
+    <QueryClientProvider client={queryClient}>
+      <FollowedProjectsProvider>
+        <ArchiveCapture />
+      </FollowedProjectsProvider>
+    </QueryClientProvider>,
+  );
+
+  expect(await screen.findByText("recent:ses_new")).toBeOnTheScreen();
+  expect(screen.queryByText("recent:ses_before")).toBeNull();
+  expect(screen.getByText("working:collapsed")).toBeOnTheScreen();
+  expect(screen.getByText("archived:collapsed")).toBeOnTheScreen();
+  // The session list pages back to the inbox start.
+  expect(startSessionInbox).toHaveBeenCalledWith(mockDb, "connection-1", 1, expect.any(Number));
+
+  view.unmount();
+  queryClient.clear();
+});
+
+function ArchiveCapture() {
+  const state = useFollowedProjects();
+  return (
+    <>
+      <Text>working:{state.workingExpanded ? "expanded" : "collapsed"}</Text>
+      <Text>archived:{state.archivedExpanded ? "expanded" : "collapsed"}</Text>
+      {[...state.inbox.recent, ...state.inbox.archived].map((row) => (
+        <Pressable
+          accessibilityLabel={`${row.archived ? "Unarchive" : "Archive"} ${row.session.id}`}
+          accessibilityRole="button"
+          key={row.session.id}
+          onPress={() => void state.archiveSession(row.session, !row.archived)}
+        >
+          <Text>
+            {row.section}:{row.session.id}
+          </Text>
+        </Pressable>
+      ))}
+    </>
+  );
+}
+
+function activeListCalls() {
+  return mockListProjectSessions.mock.calls.filter((call) => !call[2].archived).length;
+}
+
+function Capture() {
+  const state = useFollowedProjects();
+  return (
+    <>
+      <Text>
+        {state.attentionCoverage.completeness}:{state.pendingCount}:{state.inbox.needsYou.length}:
+        {state.inbox.working.length}
+      </Text>
+      <Text>freshness:{state.attentionCoverage.freshness}</Text>
+      <Text>followed:{state.followedProjectIds.join(",")}</Text>
+      <Text>preferences:{state.preferencesError ? "error" : "ok"}</Text>
+      {state.inbox.recent.map((row) => (
+        <Text key={row.session.id}>recent:{row.session.id}</Text>
+      ))}
+      {state.attentionCoverage.failedLocations?.map((failure) => (
+        <Text key={failure.location.directory}>
+          unavailable:{failure.projectLabel}:{failure.location.directory}:{failure.source}:
+          {failure.failedChecks.join(",")}
+        </Text>
+      ))}
+      <Text>
+        locations:{state.attentionCoverage.failedLocationCount}:
+        {state.attentionCoverage.reconciledLocationCount}
+      </Text>
+      <Text>
+        failed:
+        {state.attentionCoverage.failedProjects
+          .map((project) => `${project.label}:${project.locationCount}`)
+          .join(",")}
+      </Text>
+      {state.inbox.needsYou.map((row) => (
+        <Text key={row.session.id}>
+          {row.projectLabel}:{row.targetSessionID}:{row.active ? 1 : 0}:{row.attentionCount}
+        </Text>
+      ))}
+      {state.permissions[0] ? (
+        <Pressable
+          accessibilityRole="button"
+          onPress={() =>
+            state.replyPermission(
+              state.permissions[0]?.id ?? "",
+              state.permissions[0]?.sessionID ?? "",
+              "once",
+            )
+          }
+        >
+          <Text>Allow once</Text>
+        </Pressable>
+      ) : null}
+      <Pressable
+        accessibilityLabel="Follow only Beta"
+        accessibilityRole="button"
+        onPress={() => void state.setFollowedProjectIds(["project-b"])}
+      >
+        <Text>Follow only Beta</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="Select Alpha location"
+        accessibilityRole="button"
+        onPress={() => state.setLocation({ directory: "/a" })}
+      >
+        <Text>Select Alpha location</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="Search sessions"
+        accessibilityRole="button"
+        onPress={() => state.setSearch("needle")}
+      >
+        <Text>Search sessions</Text>
+      </Pressable>
+      <Pressable
+        accessibilityLabel="Refresh sessions"
+        accessibilityRole="button"
+        onPress={() => void state.refetch()}
+      >
+        <Text>Refresh sessions</Text>
+      </Pressable>
+    </>
+  );
+}
+
+function mockResolvedLocation(directory: string, projectID: string) {
+  return {
+    directory,
+    project: { canonical: projectID === "project-a" ? "/a" : "/b", directory, id: projectID },
+  };
+}
+
+function mockSession(id: string, projectID: string, directory: string, updated: number) {
+  return {
+    cost: 0,
+    id,
+    location: { directory },
+    projectID,
+    time: { created: updated, idle: updated, updated },
+    title: id,
+    tokens: { cache: { read: 0, write: 0 }, input: 0, output: 0, reasoning: 0 },
+  };
+}

@@ -1,0 +1,2007 @@
+import { afterEach, expect, jest, test } from "@jest/globals";
+import type { SessionMessageInfo } from "@opencode2-mobile/opencode-adapter";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react-native";
+import * as Clipboard from "expo-clipboard";
+import { AccessibilityInfo, Alert, Linking, Platform, StyleSheet, View } from "react-native";
+
+import { resetTranscriptPerformanceMetrics } from "../state/transcript-performance";
+import { markdownPalette, palette, pressedOpacity, typography } from "../theme";
+import {
+  activityFailureSummary,
+  activitySummary,
+  buildTranscriptPresentation,
+  groupTranscriptMessages,
+  PendingPromptRow,
+  SessionSubagentStates,
+  SessionTranscriptRow,
+  TranscriptActivityGroup,
+  TranscriptUpdatesGroup,
+} from "./session-transcript";
+import { subagentStates } from "./session-transcript-model";
+
+afterEach(resetTranscriptPerformanceMetrics);
+
+test("the tool group reads Used N tools, with no status or chevron", () => {
+  const item = {
+    type: "activity-group" as const,
+    id: "activity:test",
+    count: 1,
+    running: true,
+    messages: [],
+  };
+  const props = {
+    largeText: false,
+    showReasoning: true,
+    onOpenDiff: jest.fn(),
+    onOpenSubagent: jest.fn(),
+  };
+  const view = render(<TranscriptActivityGroup {...props} item={item} />);
+  // The Working line says the turn runs; the group itself stays quiet, as in OpenCode iOS.
+  expect(screen.getByRole("button", { name: "Used 1 tool" })).toBeOnTheScreen();
+  expect(screen.getByText("Used 1 tool")).toHaveStyle({ color: palette.dim });
+  expect(screen.queryByText("Running")).toBeNull();
+  view.rerender(
+    <TranscriptActivityGroup {...props} item={{ ...item, count: 3, running: false }} />,
+  );
+  expect(screen.getByRole("button", { name: "Used 3 tools" })).toBeOnTheScreen();
+  expect(screen.queryByText("Finished")).toBeNull();
+});
+
+test("empty assistant snapshots do not flash placeholder rows between tool updates", () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("Missing assistant fixture");
+  const snapshot = { ...message };
+  delete snapshot.retry;
+  const view = render(<SessionTranscriptRow message={{ ...snapshot, content: [] }} />);
+  expect(screen.queryByText("No projected content")).toBeNull();
+  view.rerender(
+    <SessionTranscriptRow
+      message={{ ...snapshot, content: [{ type: "text", text: "New streamed text" }] }}
+    />,
+  );
+  expect(screen.getByText("New streamed text")).toBeOnTheScreen();
+});
+
+test("empty assistant snapshots do not split an existing tool summary", () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("Missing assistant fixture");
+  const tool = message.content.find((part) => part.type === "tool");
+  if (!tool) throw new Error("Missing tool fixture");
+  const snapshot = { ...message };
+  delete snapshot.retry;
+  const first = { ...snapshot, id: "first", content: [tool] };
+  const last = { ...snapshot, id: "last", content: [tool] };
+  const expected = groupTranscriptMessages([first, last], false, true);
+  expect(
+    groupTranscriptMessages([first, { ...snapshot, id: "empty", content: [] }, last], false, true),
+  ).toEqual(expected);
+  expect(groupTranscriptMessages([{ ...snapshot, content: [] }], true, true)).toEqual([]);
+});
+
+test("assistant prose uses the shared body typography and text color", async () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("fixture");
+  render(
+    <SessionTranscriptRow
+      message={{ ...message, content: [{ type: "text", text: "Themed response" }] }}
+    />,
+  );
+  let text = screen.getByText("Themed response");
+  while (!text.props.selectable && text.parent) text = text.parent;
+  expect(text).toHaveStyle({
+    ...typography.chatBody,
+    color: palette.ink,
+  });
+  await waitFor(() =>
+    expect(screen.getByRole("button", { name: "Copy response" })).toBeOnTheScreen(),
+  );
+});
+
+jest.mock("@opencode2-mobile/opencode-adapter", () => ({
+  getOpenCodeShell: jest.fn(),
+  getOpenCodeShellOutput: jest.fn(),
+  isShellNotFoundError: jest.fn(() => false),
+  maxShellOutputBytes: 64 * 1024,
+}));
+
+jest.mock("expo-clipboard", () => ({ setStringAsync: jest.fn(async () => true) }));
+
+test("one response copy action combines prose parts without reasoning or model metadata", async () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("fixture");
+  render(
+    <SessionTranscriptRow
+      message={{
+        ...message,
+        content: [
+          { type: "text", text: "First paragraph" },
+          { type: "reasoning", text: "Private reasoning" },
+          { type: "text", text: "Second paragraph" },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getAllByRole("button", { name: "Copy response" })).toHaveLength(1);
+  fireEvent.press(screen.getByRole("button", { name: "Copy response" }));
+  await waitFor(() =>
+    expect(Clipboard.setStringAsync).toHaveBeenLastCalledWith(
+      "First paragraph\n\nSecond paragraph",
+    ),
+  );
+});
+
+test("inline code preserves literal markup and does not create links inside code", () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("fixture");
+  render(
+    <SessionTranscriptRow
+      message={{
+        ...message,
+        content: [
+          {
+            type: "text",
+            text: "Run `pnpm check`, keep `**literal**`, and inspect `https://code.test`. **Important**",
+          },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByText("pnpm check")).toHaveStyle({
+    color: palette.ink,
+    fontFamily: "Menlo",
+  });
+  expect(screen.getByText("**literal**")).toBeOnTheScreen();
+  expect(screen.queryByRole("link", { name: "https://code.test" })).toBeNull();
+  expect(screen.getByText("Important")).toHaveStyle({ fontWeight: "700" });
+});
+
+test("message text supports native selection without separate copy or selection controls", () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("fixture");
+  const text = "First paragraph\n\nSecond paragraph";
+  render(<SessionTranscriptRow message={{ ...message, content: [{ type: "text", text }] }} />);
+  for (const paragraph of ["First paragraph", "Second paragraph"]) {
+    let node = screen.getByText(paragraph);
+    while (!node.props.selectable && node.parent) node = node.parent;
+    expect(node.props.selectable).toBe(true);
+  }
+  expect(screen.queryByRole("button", { name: "Select text" })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Copy text" })).toBeNull();
+});
+
+test("nested activity reveals individual calls before their output", () => {
+  const output = `${"shell output\n".repeat(4000)}last output line`;
+  const original = messages.find((message) => message.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const tool = original.content.find(
+    (part) => part.type === "tool" && part.state.status === "completed",
+  );
+  if (tool?.type !== "tool" || tool.state.status !== "completed") throw new Error("fixture");
+  const message: SessionMessageInfo = {
+    ...original,
+    content: [
+      {
+        ...tool,
+        name: "shell",
+        state: {
+          ...tool.state,
+          input: { command: "echo nested", workdir: "/workspace", timeout: 5000 },
+          content: [{ type: "text" as const, text: output }],
+        },
+      },
+    ],
+  };
+  render(
+    <TranscriptActivityGroup
+      item={{
+        type: "activity-group",
+        id: "activity",
+        messages: [message],
+        count: 1,
+        running: false,
+      }}
+      largeText={false}
+      showReasoning
+      onOpenDiff={jest.fn()}
+      onOpenSubagent={jest.fn()}
+    />,
+  );
+  expect(screen.queryByText(output)).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Used 1 tool" }));
+  expect(screen.queryByText(output)).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /Shell.*Show/ }));
+  expect(screen.getByText(output)).toBeOnTheScreen();
+  expect(screen.getAllByText("echo nested")).toHaveLength(1);
+  expect(screen.getByText(/"workdir": "\/workspace"/)).toBeOnTheScreen();
+  expect(screen.getByText(/"timeout": 5000/)).toBeOnTheScreen();
+  expect(screen.queryByRole("button", { name: /Show more/ })).toBeNull();
+  expect(screen.getByLabelText("Shell output")).toHaveStyle({ maxHeight: 240 });
+  expect(screen.getByLabelText("Shell output").props.nestedScrollEnabled).toBe(true);
+  expect(screen.getByRole("button", { name: "Copy shell output" })).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: /Shell.*Hide/ }));
+  expect(screen.queryByText(output)).toBeNull();
+});
+
+test("activity summaries count operations rather than inventing file counts", () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("fixture");
+  const tool = message.content.find((part) => part.type === "tool");
+  if (!tool) throw new Error("fixture");
+  expect(
+    activitySummary([
+      {
+        ...message,
+        content: ["glob", "grep", "shell", "patch"].map((name, index) => ({
+          ...tool,
+          name,
+          id: `tool_${index}`,
+        })),
+      },
+    ]),
+  ).toBe("Used 4 Glob, Grep, Shell, Patch");
+});
+
+test("collapsed failures distinguish interruptions without exposing server error text", () => {
+  const original = messages.find((item) => item.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const message: SessionMessageInfo = {
+    ...original,
+    content: ["Request aborted at /private/path", "secret failure detail"].map(
+      (message, index) => ({
+        type: "tool" as const,
+        name: "shell",
+        id: `tool_error_${index}`,
+        time: { created: 1 },
+        state: {
+          status: "error" as const,
+          input: {},
+          metadata: {},
+          error: { type: "ToolError", message },
+        },
+      }),
+    ),
+  };
+  expect(activityFailureSummary([message])).toBe("1 failed · 1 interrupted");
+  render(
+    <TranscriptActivityGroup
+      item={{
+        type: "activity-group",
+        id: "activity_errors",
+        messages: [message],
+        count: 2,
+        running: false,
+      }}
+      largeText={false}
+      showReasoning
+      onOpenDiff={jest.fn()}
+      onOpenSubagent={jest.fn()}
+    />,
+  );
+  expect(screen.getByText("1 failed · 1 interrupted. Expand for details.")).toBeOnTheScreen();
+  // The failures are part of the button's name, not only its hint.
+  expect(
+    screen.getByRole("button", { name: "Used 2 tools, 1 failed, 1 interrupted" }),
+  ).toBeOnTheScreen();
+  expect(screen.getByText("Used 2 tools")).toHaveStyle(typography.chatActivity);
+  expect(screen.queryByText(/private\/path|secret failure detail/)).toBeNull();
+});
+
+test.each([
+  [
+    "execute",
+    { code: "return await tools.browser.tabs.list();" },
+    "return await tools.browser.tabs.list();",
+  ],
+  ["webfetch", { url: "https://example.test/docs" }, "https://example.test/docs"],
+  ["websearch", { query: "native shell output" }, "native shell output"],
+] satisfies [string, Record<string, string>, string][])(
+  "collapsed %s tools show the same input preview as the web client",
+  (name, input, preview) => {
+    const original = messages.find((message) => message.type === "assistant");
+    if (!original) throw new Error("fixture");
+    render(
+      <SessionTranscriptRow
+        detailed
+        message={{
+          ...original,
+          content: [
+            {
+              type: "tool",
+              id: "tool_preview",
+              name,
+              time: { created: 1 },
+              state: {
+                status: "completed",
+                input,
+                content: [{ type: "text", text: "Tool result" }],
+              },
+            },
+          ],
+        }}
+      />,
+    );
+    expect(screen.getByText(preview)).toBeOnTheScreen();
+    expect(screen.queryByText("Tool result")).toBeNull();
+  },
+);
+
+test("cross-message grouping respects replies, errors, reasoning visibility and detailed mode", () => {
+  const original = messages.find((message) => message.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const tool = original.content.find(
+    (part) => part.type === "tool" && part.state.status === "completed",
+  );
+  if (!tool) throw new Error("fixture");
+  const first = { ...original, retry: undefined, content: [tool] };
+  // Remove the retry field so this fixture represents a normal successful execution.
+  const { retry: _retry, ...clean } = first;
+  const second = { ...clean, id: "msg_second" };
+  const reasoning = {
+    ...clean,
+    id: "msg_reasoning",
+    content: [{ type: "reasoning" as const, text: "Thinking" }],
+  };
+  const reply = { ...clean, id: "msg_reply", content: [{ type: "text" as const, text: "Reply" }] };
+  expect(groupTranscriptMessages([clean, reasoning, second], false, false)).toMatchObject([
+    { type: "activity-group", count: 2 },
+  ]);
+  expect(groupTranscriptMessages([clean, reasoning, second], false, true)).toMatchObject([
+    { type: "activity-group", count: 2, messages: [clean, reasoning, second] },
+  ]);
+  expect(groupTranscriptMessages([clean, reply, second], false, false)).toHaveLength(3);
+  expect(groupTranscriptMessages([clean, second], true, false)).toEqual([clean, second]);
+  const mixed = { ...clean, content: [{ type: "text" as const, text: "Progress" }, tool] };
+  expect(groupTranscriptMessages([mixed, second], false, true)).toMatchObject([
+    { type: "assistant", content: [{ type: "text", text: "Progress" }] },
+    { type: "activity-group", count: 2 },
+  ]);
+  const failed = { ...second, error: { type: "ToolError", message: "Failed" } };
+  expect(groupTranscriptMessages([clean, failed], false, false)).toMatchObject([
+    { type: "activity-group", count: 1 },
+    failed,
+  ]);
+});
+
+test("reasoning can be hidden without hiding replies or tool failures", () => {
+  const message = messages.find((item) => item.type === "assistant");
+  if (!message) throw new Error("fixture");
+  const view = render(<SessionTranscriptRow message={message} showReasoning={false} />);
+  expect(screen.getByText("Answer")).toBeOnTheScreen();
+  expect(screen.getByText("tool failed")).toBeOnTheScreen();
+  expect(screen.queryByText("Reasoning detail")).toBeNull();
+  view.rerender(<SessionTranscriptRow message={message} showReasoning />);
+  expect(screen.getByText("Reasoning detail")).toBeOnTheScreen();
+});
+
+test("newest-first pages keep six calls before commentary and five after it", () => {
+  const original = messages.find((message) => message.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const tool = original.content.find((part) => part.type === "tool");
+  if (!tool) throw new Error("fixture");
+  const { retry: _retry, ...assistant } = original;
+  const calls = (count: number, prefix: string) =>
+    Array.from({ length: count }, (_, index) => ({
+      ...tool,
+      id: `${prefix}-${index}`,
+      name: index % 2 ? "grep" : "read",
+    }));
+  const older = { ...assistant, id: "older", content: calls(6, "before") };
+  const mixed = {
+    ...assistant,
+    id: "mixed",
+    content: [{ type: "text" as const, text: "Progress commentary" }, ...calls(5, "after")],
+  };
+  const presentation = buildTranscriptPresentation([mixed, older], false, true);
+  expect([...presentation.items].reverse()).toMatchObject([
+    { type: "activity-group", count: 6 },
+    { type: "assistant", content: [{ type: "text", text: "Progress commentary" }] },
+    { type: "activity-group", count: 5 },
+  ]);
+  const newer = { ...assistant, id: "newer", content: calls(1, "new") };
+  const streamed = buildTranscriptPresentation([newer, mixed, older], false, true);
+  expect(streamed.items[0]).toMatchObject({ id: presentation.items[0]?.id, count: 6 });
+  expect(
+    presentation.items[0]?.type === "activity-group" &&
+      presentation.items[0].messages.flatMap((message) =>
+        message.type === "assistant"
+          ? message.content.map((part) => (part.type === "tool" ? part.id : ""))
+          : [],
+      ),
+  ).toEqual(["after-0", "after-1", "after-2", "after-3", "after-4"]);
+});
+
+test("updates remain inspectable and successful idle rows do not divide a turn footer", () => {
+  const original = messages.find((message) => message.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const { retry: _retry, ...assistant } = original;
+  const user: SessionMessageInfo = {
+    type: "user",
+    id: "start",
+    text: "Prompt",
+    time: { created: 0 },
+  };
+  const first = {
+    ...assistant,
+    id: "first",
+    content: [{ type: "text" as const, text: "Publishing" }],
+    time: { created: 1000, completed: 5000 },
+  };
+  const idle: SessionMessageInfo = {
+    type: "idle",
+    id: "idle",
+    outcome: "succeeded",
+    time: { created: 5001 },
+  };
+  const update: SessionMessageInfo = {
+    type: "synthetic",
+    id: "update",
+    description: "long background command",
+    text: "Background result",
+    time: { created: 6000 },
+  };
+  const last = {
+    ...first,
+    id: "last",
+    content: [{ type: "text" as const, text: "Published" }],
+    time: { created: 100000, completed: 113000 },
+  };
+  const result = buildTranscriptPresentation([last, update, idle, first, user], false, true);
+  expect(result.items.map((item) => item.type)).toEqual([
+    "assistant",
+    "updates-group",
+    "assistant",
+    "user",
+  ]);
+  expect([...result.footers]).toEqual([["last", 113000]]);
+  const group = result.items[1];
+  if (group?.type !== "updates-group") throw new Error("expected updates");
+  render(<TranscriptUpdatesGroup item={group} largeText={false} onOpenSubagent={jest.fn()} />);
+  expect(screen.queryByText("long background command")).toBeNull();
+  expect(screen.queryByText("Background result")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Updates Show" }));
+  expect(screen.getByText("long background command")).toBeOnTheScreen();
+  expect(screen.getByText("Background result")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "Updates Hide" }));
+  expect(screen.queryByText("Background result")).toBeNull();
+  expect(
+    buildTranscriptPresentation([last, first], false, true).footers.get("last"),
+  ).toBeUndefined();
+  expect(buildTranscriptPresentation([last, update, idle, first, user], true, true).items).toEqual([
+    last,
+    update,
+    idle,
+    first,
+    user,
+  ]);
+});
+
+test("turn footer timing resets at a user prompt and failed outcomes stay visible", () => {
+  const original = messages.find((message) => message.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const { retry: _retry, ...assistant } = original;
+  const user: SessionMessageInfo = {
+    type: "user",
+    id: "user",
+    text: "Prompt",
+    time: { created: 0 },
+  };
+  const reply = {
+    ...assistant,
+    content: [{ type: "text" as const, text: "Reply" }],
+    time: { created: 1000, completed: 2000 },
+  };
+  const failed: SessionMessageInfo = {
+    type: "idle",
+    id: "failed",
+    outcome: "failed",
+    time: { created: 2100 },
+  };
+  const second = { ...reply, id: "second", time: { created: 3000, completed: 8000 } };
+  const result = buildTranscriptPresentation(
+    [second, { ...user, id: "next", time: { created: 2500 } }, failed, reply, user],
+    false,
+    false,
+  );
+  expect([...result.footers]).toEqual([
+    [reply.id, 2000],
+    ["second", 5500],
+  ]);
+  expect(result.items).toContain(failed);
+});
+
+test("compact system notices expand and detailed mode shows their content", () => {
+  const message = messages.find((item) => item.type === "synthetic");
+  if (!message) throw new Error("fixture");
+  const view = render(<SessionTranscriptRow message={message} />);
+  expect(screen.queryByText("Generated")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /Generated context/ }));
+  expect(screen.getByText("Generated")).toBeOnTheScreen();
+  view.rerender(<SessionTranscriptRow detailed message={message} />);
+  expect(screen.getByText("Generated")).toBeOnTheScreen();
+});
+
+test("skill calls use the generated id or metadata name in a compact loaded label", () => {
+  const original = messages.find((message) => message.type === "assistant");
+  if (!original) throw new Error("fixture");
+  const { retry: _retry, ...assistant } = original;
+  const tool = {
+    type: "tool" as const,
+    id: "tool_skill",
+    name: "skill",
+    time: { created: 1 },
+    state: {
+      status: "completed" as const,
+      input: { id: "native-ui" },
+      content: [{ type: "text" as const, text: "Skill instructions" }] as [
+        { type: "text"; text: string },
+      ],
+    },
+  };
+  const view = render(
+    <SessionTranscriptRow detailed message={{ ...assistant, content: [tool] }} />,
+  );
+  expect(screen.getByText("Loaded native-ui skill")).toBeOnTheScreen();
+  expect(screen.queryByText(/"id":/)).toBeNull();
+  expect(screen.queryByText("Skill instructions")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Loaded native-ui skill" }));
+  expect(screen.getByText("Skill instructions")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "Loaded native-ui skill" }));
+  expect(screen.queryByText("Skill instructions")).toBeNull();
+  view.rerender(
+    <SessionTranscriptRow
+      detailed
+      message={{
+        ...assistant,
+        content: [{ ...tool, state: { ...tool.state, metadata: { name: "Native UI" } } }],
+      }}
+    />,
+  );
+  expect(screen.getByText("Loaded Native UI skill")).toBeOnTheScreen();
+  view.rerender(
+    <SessionTranscriptRow
+      detailed
+      message={{
+        ...assistant,
+        content: [
+          {
+            ...tool,
+            state: {
+              status: "error",
+              input: tool.state.input,
+              error: { type: "ToolError", message: "Skill missing" },
+            },
+          },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByText("Skill missing")).toBeOnTheScreen();
+});
+
+test("detailed mode renders grouped tool executions individually", () => {
+  const original = messages.find((item) => item.type === "assistant");
+  if (original?.type !== "assistant") throw new Error("fixture");
+  const tool = original.content.find(
+    (part) => part.type === "tool" && part.state.status === "completed",
+  );
+  if (tool?.type !== "tool") throw new Error("fixture");
+  const message = {
+    ...original,
+    content: [tool, { ...tool, id: "tool-second", name: "second-tool" }],
+  };
+  const view = render(<SessionTranscriptRow message={message} />);
+  expect(screen.queryByText("Used Second-tool")).toBeNull();
+  view.rerender(<SessionTranscriptRow detailed message={message} />);
+  expect(screen.getByText("Used Second-tool")).toBeOnTheScreen();
+});
+
+test.each([
+  { outcome: "succeeded", label: "Turn completed" },
+  { outcome: "failed", label: "Turn failed" },
+  { outcome: "interrupted", label: "Turn interrupted" },
+] as const)("renders the idle outcome $outcome", ({ outcome, label }) => {
+  render(
+    <SessionTranscriptRow
+      detailed
+      message={{ id: "msg_idle", time: { created: 1 }, type: "idle", outcome }}
+    />,
+  );
+  expect(screen.getByText(label)).toBeTruthy();
+  expect(screen.queryByText("Unsupported message")).toBeNull();
+});
+
+const messages: SessionMessageInfo[] = [
+  { agent: "build", id: "msg_agent", time: { created: 1 }, type: "agent-switched" },
+  {
+    id: "msg_model",
+    model: { id: "model-1", providerID: "provider" },
+    time: { created: 2 },
+    type: "model-switched",
+  },
+  {
+    id: "msg_location",
+    location: { directory: "/workspace/repository" },
+    time: { created: 3 },
+    type: "location-switched",
+  },
+  {
+    files: [{ data: "c2VjcmV0", mime: "text/plain", name: "note.txt", source: { type: "inline" } }],
+    id: "msg_user",
+    text: "Question",
+    time: { created: 4 },
+    type: "user",
+  },
+  { id: "msg_synthetic", text: "Generated", time: { created: 5 }, type: "synthetic" },
+  { id: "msg_system", text: "System", time: { created: 6 }, type: "system" },
+  {
+    id: "msg_skill",
+    name: "Review",
+    skill: "review",
+    text: "Skill text",
+    time: { created: 7 },
+    type: "skill",
+  },
+  {
+    command: "pnpm test",
+    id: "msg_shell",
+    output: { cursor: 2, output: "shell output", size: 2, truncated: false },
+    shellID: "shell-1",
+    status: "exited",
+    time: { created: 8 },
+    type: "shell",
+  },
+  {
+    agent: "build",
+    content: [
+      { text: "Answer", type: "text" },
+      { text: "Reasoning detail", type: "reasoning" },
+      {
+        id: "tool-streaming",
+        name: "streaming-tool",
+        state: { input: "{", status: "streaming" },
+        time: { created: 9 },
+        type: "tool",
+      },
+      {
+        id: "tool-running",
+        name: "running-tool",
+        state: { input: {}, metadata: {}, status: "running" },
+        time: { created: 9 },
+        type: "tool",
+      },
+      {
+        id: "tool-completed",
+        name: "completed-tool",
+        state: { content: [{ text: "tool output", type: "text" }], input: {}, status: "completed" },
+        time: { created: 9 },
+        type: "tool",
+      },
+      {
+        id: "tool-error",
+        name: "error-tool",
+        state: {
+          error: { message: "tool failed", type: "ToolError" },
+          input: {},
+          status: "error",
+        },
+        time: { created: 9 },
+        type: "tool",
+      },
+    ],
+    id: "msg_assistant",
+    model: { id: "model-1", providerID: "provider" },
+    retry: { at: 10, attempt: 2, error: { message: "retry", type: "RetryError" } },
+    time: { created: 9 },
+    type: "assistant",
+  },
+  {
+    id: "msg_compaction",
+    reason: "auto",
+    status: "completed",
+    summary: "Compaction summary",
+    time: { created: 10 },
+    type: "compaction",
+  },
+  {
+    error: { message: "Compaction error", type: "CompactionError" },
+    id: "msg_compaction_error",
+    reason: "manual",
+    status: "failed",
+    time: { created: 11 },
+    type: "compaction",
+  },
+];
+
+test("renders every current message and tool state with large details collapsed", () => {
+  render(
+    <View>
+      {messages.map((message) => (
+        <SessionTranscriptRow detailed key={message.id} message={message} />
+      ))}
+    </View>,
+  );
+
+  expect(screen.getByText("Question")).toBeOnTheScreen();
+  expect(screen.getByText("note.txt")).toBeOnTheScreen();
+  expect(screen.getByText("Answer")).toBeOnTheScreen();
+  expect(screen.getByText("streaming-tool")).toBeOnTheScreen();
+  expect(screen.getByText("Preparing")).toBeOnTheScreen();
+  expect(screen.getByText("running-tool")).toBeOnTheScreen();
+  expect(screen.getByText("Running")).toBeOnTheScreen();
+  expect(screen.getByText("Retry 2 scheduled")).toBeOnTheScreen();
+  expect(screen.getByText("repository")).toBeOnTheScreen();
+  expect(screen.getByText("Reasoning detail")).toBeOnTheScreen();
+  expect(screen.queryByText("tool output")).toBeNull();
+  expect(screen.queryByText("shell output")).toBeNull();
+  expect(screen.queryByText("Compaction summary")).toBeNull();
+  expect(screen.queryByText("c2VjcmV0")).toBeNull();
+
+  fireEvent.press(screen.getByRole("button", { name: /Retry 2 scheduled/ }));
+  fireEvent.press(screen.getByRole("button", { name: /completed-tool/i }));
+  fireEvent.press(screen.getByRole("button", { name: /error-tool/ }));
+  fireEvent.press(screen.getByRole("button", { name: /Ran/ }));
+  fireEvent.press(screen.getByRole("button", { name: /Compaction \/ Completed/ }));
+
+  expect(screen.getByText("retry")).toBeOnTheScreen();
+  expect(screen.getByText("tool output")).toBeOnTheScreen();
+  expect(screen.getByText("tool failed")).toBeOnTheScreen();
+  expect(screen.getByText("shell output")).toBeOnTheScreen();
+  expect(screen.getByText("Compaction summary")).toBeOnTheScreen();
+});
+
+test("reveals large text in bounded steps", () => {
+  const text = `${"a".repeat(4_100)}tail`;
+  render(
+    <SessionTranscriptRow
+      message={{ id: "msg_large", text, time: { created: 1 }, type: "user" }}
+    />,
+  );
+
+  expect(screen.queryByText(/tail$/)).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Show more" }));
+  expect(screen.getByText(/tail$/)).toBeOnTheScreen();
+});
+
+test("opens HTTP and HTTPS transcript URLs as confirmed external links", () => {
+  const open = jest.spyOn(Linking, "openURL").mockResolvedValue(true);
+  const alert = jest
+    .spyOn(Alert, "alert")
+    .mockImplementation((_title, _message, buttons) =>
+      buttons?.find((button) => button.text === "Open")?.onPress?.(),
+    );
+  render(
+    <View>
+      <SessionTranscriptRow
+        message={{
+          id: "msg_links",
+          text: "Read https://example.test/docs, then http://localhost:4096/status.",
+          time: { created: 1 },
+          type: "user",
+        }}
+      />
+      <SessionTranscriptRow
+        message={{
+          agent: "build",
+          content: [{ text: "See **https://assistant.test/guide**.", type: "text" }],
+          id: "msg_assistant_link",
+          model: { id: "model-1", providerID: "provider" },
+          time: { created: 2 },
+          type: "assistant",
+        }}
+      />
+    </View>,
+  );
+
+  const secureLink = screen.getByRole("link", { name: "https://example.test/docs" });
+  expect(secureLink).toHaveStyle({
+    color: markdownPalette.linkText,
+    textDecorationLine: "underline",
+  });
+  expect(screen.getByRole("link", { name: "http://localhost:4096/status" })).toBeOnTheScreen();
+  expect(screen.getByRole("link", { name: "https://assistant.test/guide" })).toHaveStyle({
+    fontWeight: "700",
+  });
+
+  fireEvent.press(secureLink);
+  expect(alert).toHaveBeenCalledWith(
+    "Open external link?",
+    expect.stringContaining("opens example.test"),
+    expect.any(Array),
+  );
+  expect(open).toHaveBeenCalledWith("https://example.test/docs");
+
+  alert.mockRestore();
+  open.mockRestore();
+});
+
+test("keeps URLs in fenced code blocks inert", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [{ text: "```text\nhttps://example.test/code\n```", type: "text" }],
+        id: "msg_code_link",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("https://example.test/code")).toBeOnTheScreen();
+  expect(screen.queryByRole("link")).toBeNull();
+});
+
+test("renders nested bold code and table cells without leaking Markdown markers", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        id: "msg_markdown_table",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+        content: [
+          {
+            type: "text",
+            text: "Use **`IMAGE_TAG`** to select this image.\n\nIn short:\n\n| Change | Rebuild needed? |\n|---|---|\n| Test configuration | Yes, `make image` |\n| Runtime `ARGS` | **No** |",
+          },
+        ],
+      }}
+    />,
+  );
+  expect(screen.getByText("Change")).toBeOnTheScreen();
+  expect(screen.getByText("Rebuild needed?")).toBeOnTheScreen();
+  expect(screen.getByText("IMAGE_TAG")).toHaveStyle({ fontWeight: "700" });
+  expect(screen.queryByText(/\*\*/)).toBeNull();
+  expect(screen.queryByText(/\|---/)).toBeNull();
+});
+
+test("shows the responding model display name and measured runtime in the footer", () => {
+  render(
+    <SessionTranscriptRow
+      modelName="Model One"
+      message={{
+        agent: "plan",
+        id: "msg_footer",
+        model: { id: "model-1", providerID: "provider" },
+        content: [{ type: "text", text: "Done." }],
+        time: { created: 1000, completed: 29000 },
+        type: "assistant",
+      }}
+    />,
+  );
+  expect(screen.getByText("Plan · Model One · 28s")).toHaveStyle(typography.caption);
+});
+
+test("renders fenced assistant code without markdown fence markers", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            text: "Verify afterward:\n\n```gdb\ninfo sharedlibrary\nx/16i $pc-32\n```\n\nThen inspect the stack.",
+            type: "text",
+          },
+        ],
+        id: "msg_code_block",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Verify afterward:")).toBeOnTheScreen();
+  expect(screen.getByText("gdb")).toBeOnTheScreen();
+  expect(screen.getByText("info sharedlibrary\nx/16i $pc-32")).toBeOnTheScreen();
+  expect(screen.getByText("Then inspect the stack.")).toBeOnTheScreen();
+  expect(screen.queryByText(/```/)).toBeNull();
+  expect(screen.getByLabelText("Code block, gdb")).toHaveStyle({
+    backgroundColor: palette.card,
+    borderWidth: 1,
+  });
+});
+
+test("renders an unfinished code fence while assistant text streams", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [{ text: "```sh\npnpm test", type: "text" }],
+        id: "msg_streaming_code_block",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("sh")).toBeOnTheScreen();
+  expect(screen.getByText("pnpm test")).toBeOnTheScreen();
+  expect(screen.queryByText(/```/)).toBeNull();
+});
+
+test("renders finished short reasoning inline with bold markdown", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            text: "**Adding mocks to repository tests**",
+            time: { completed: 2, created: 1 },
+            type: "reasoning",
+          },
+        ],
+        id: "msg_inline_reasoning",
+        model: { id: "model-1", providerID: "provider" },
+        time: { completed: 2, created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Thought")).toBeOnTheScreen();
+  expect(screen.queryByText("Thinking")).toBeNull();
+  expect(screen.getByText("Adding mocks to repository tests")).toHaveStyle({ fontWeight: "700" });
+  expect(screen.queryByText(/\*\*/)).toBeNull();
+  expect(screen.queryByRole("button", { name: /Thought/ })).toBeNull();
+});
+
+test("labels reasoning as thinking until the part completes", () => {
+  const { rerender } = render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [{ text: "Checking the failing test", time: { created: 1 }, type: "reasoning" }],
+        id: "msg_streaming_reasoning",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Thinking")).toBeOnTheScreen();
+  expect(screen.queryByText("Thought")).toBeNull();
+
+  rerender(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            text: "Checking the failing test",
+            time: { completed: 2, created: 1 },
+            type: "reasoning",
+          },
+        ],
+        id: "msg_streaming_reasoning",
+        model: { id: "model-1", providerID: "provider" },
+        time: { completed: 2, created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Thought")).toBeOnTheScreen();
+  expect(screen.queryByText("Thinking")).toBeNull();
+});
+
+test("settles reasoning when the message completes without a part completion time", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [{ text: "First step\nSecond step", time: { created: 1 }, type: "reasoning" }],
+        id: "msg_settled_message_reasoning",
+        model: { id: "model-1", providerID: "provider" },
+        time: { completed: 2, created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.queryByRole("button", { name: /Thinking/ })).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /Thought/ }));
+  expect(screen.getByText("First step\nSecond step")).toBeOnTheScreen();
+});
+
+test("keeps multiline reasoning in a disclosure", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            text: "First step\nSecond step",
+            time: { completed: 2, created: 1 },
+            type: "reasoning",
+          },
+        ],
+        id: "msg_multiline_reasoning",
+        model: { id: "model-1", providerID: "provider" },
+        time: { completed: 2, created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.queryByText("First step\nSecond step")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /Thought/ }));
+  expect(screen.getByText("First step\nSecond step")).toBeOnTheScreen();
+});
+
+test("labels an exploration group as exploring while a search is in flight", () => {
+  const { rerender } = render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            id: "tool-read",
+            name: "read",
+            state: {
+              content: [{ text: "source", type: "text" }],
+              input: { path: "src/a.ts" },
+              status: "completed",
+            },
+            time: { completed: 1_400, created: 1_100 },
+            type: "tool",
+          },
+          {
+            id: "tool-grep",
+            name: "grep",
+            state: { input: { pattern: "TODO" }, metadata: {}, status: "running" },
+            time: { created: 1_500 },
+            type: "tool",
+          },
+        ],
+        id: "msg_exploring",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1_000 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Exploring")).toBeOnTheScreen();
+  expect(screen.getByText("2 searches · Running")).toBeOnTheScreen();
+  expect(screen.queryByText("Explored")).toBeNull();
+
+  rerender(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            id: "tool-read",
+            name: "read",
+            state: {
+              content: [{ text: "source", type: "text" }],
+              input: { path: "src/a.ts" },
+              status: "completed",
+            },
+            time: { completed: 1_400, created: 1_100 },
+            type: "tool",
+          },
+          {
+            id: "tool-grep",
+            name: "grep",
+            state: {
+              content: [{ text: "match", type: "text" }],
+              input: { pattern: "TODO" },
+              status: "completed",
+            },
+            time: { completed: 1_700, created: 1_500 },
+            type: "tool",
+          },
+        ],
+        id: "msg_exploring",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1_000 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Explored")).toBeOnTheScreen();
+  expect(screen.getByText("2 searches")).toBeOnTheScreen();
+  expect(screen.queryByText("Exploring")).toBeNull();
+});
+
+test("labels a shell message as running until it exits", () => {
+  const { rerender } = render(
+    <SessionTranscriptRow
+      message={{
+        command: "pnpm test",
+        id: "msg_shell_running",
+        output: { cursor: 1, output: "shell output", size: 2, truncated: false },
+        shellID: "shell-2",
+        status: "running",
+        time: { created: 8 },
+        type: "shell",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Running")).toBeOnTheScreen();
+  expect(screen.getByText("pnpm test · Running")).toBeOnTheScreen();
+  expect(screen.queryByText("Ran")).toBeNull();
+
+  rerender(
+    <SessionTranscriptRow
+      message={{
+        command: "pnpm test",
+        id: "msg_shell_running",
+        output: { cursor: 2, output: "shell output", size: 2, truncated: false },
+        shellID: "shell-2",
+        status: "exited",
+        time: { created: 8 },
+        type: "shell",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Ran")).toBeOnTheScreen();
+  expect(screen.getByText("pnpm test")).toBeOnTheScreen();
+  expect(screen.queryByText("Running")).toBeNull();
+});
+
+test("groups completed assistant activity and places narrative metadata in the footer", () => {
+  const openDiff = jest.fn();
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            id: "tool-read",
+            name: "read",
+            state: {
+              content: [{ text: "source", type: "text" }],
+              input: { path: "src/a.ts" },
+              status: "completed",
+            },
+            time: { completed: 1_500, created: 1_100 },
+            type: "tool",
+          },
+          {
+            id: "tool-grep",
+            name: "grep",
+            state: {
+              content: [{ text: "match", type: "text" }],
+              input: { pattern: "TODO" },
+              status: "completed",
+            },
+            time: { completed: 1_700, created: 1_500 },
+            type: "tool",
+          },
+          {
+            id: "tool-patch",
+            name: "patch",
+            state: {
+              content: [{ text: "Applied", type: "text" }],
+              input: {
+                patchText:
+                  "*** Begin Patch\n*** Update File: src/a.ts\n*** Add File: src/b.ts\n*** End Patch",
+              },
+              status: "completed",
+            },
+            time: { completed: 2_200, created: 1_800 },
+            type: "tool",
+          },
+          {
+            id: "tool-shell",
+            name: "shell",
+            state: {
+              content: [{ text: "Tests pass", type: "text" }],
+              input: { command: "pnpm test" },
+              status: "completed",
+            },
+            time: { completed: 2_900, created: 2_300 },
+            type: "tool",
+          },
+          { text: "Tests pass.", type: "text" },
+        ],
+        id: "msg_grouped_activity",
+        model: { id: "model-1", providerID: "provider" },
+        time: { completed: 3_000, created: 1_000 },
+        type: "assistant",
+      }}
+      onOpenDiff={openDiff}
+    />,
+  );
+
+  expect(screen.getByText("Explored")).toBeOnTheScreen();
+  expect(screen.getByText("2 searches")).toBeOnTheScreen();
+  expect(screen.queryByText("Read")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /Explored/ }));
+  expect(screen.getByText("Read")).toBeOnTheScreen();
+  expect(screen.getByText("Grep")).toBeOnTheScreen();
+
+  expect(screen.getByText("Edited")).toBeOnTheScreen();
+  expect(screen.getByText("2 files")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: /^Edited/ }));
+  expect(screen.getAllByText("src/a.ts")).not.toHaveLength(0);
+  expect(screen.getByText("src/b.ts")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "Review current changes" }));
+  expect(openDiff).toHaveBeenCalledTimes(1);
+
+  expect(screen.getByText("Ran")).toBeOnTheScreen();
+  expect(screen.getByText("pnpm test")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: /^Ran/ }));
+  expect(screen.getByText("pnpm test")).toBeOnTheScreen();
+  expect(screen.getByText("Build · model-1 · 2s")).toBeOnTheScreen();
+});
+
+test("hides repeated assistant metadata for a tool-only turn", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            id: "tool-skill",
+            name: "skill",
+            state: {
+              content: [{ text: "Loaded review skill", type: "text" }],
+              input: { name: "review" },
+              status: "completed",
+            },
+            time: { completed: 1_500, created: 1_100 },
+            type: "tool",
+          },
+        ],
+        id: "msg_tool_only",
+        model: { id: "model-1", providerID: "provider" },
+        time: { completed: 1_500, created: 1_000 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Loaded review skill")).toBeOnTheScreen();
+  expect(screen.queryByText("Build · model-1 · 500ms")).toBeNull();
+});
+
+test("does not render an unchanged transcript row again", () => {
+  let typeReads = 0;
+  const message = new Proxy<SessionMessageInfo>(
+    { id: "msg_stable", text: "Stable row", time: { created: 1 }, type: "user" },
+    {
+      get(target, property, receiver) {
+        if (property === "type") typeReads += 1;
+        return Reflect.get(target, property, receiver);
+      },
+    },
+  );
+  const view = render(<SessionTranscriptRow message={message} />);
+  const initialReads = typeReads;
+
+  view.rerender(<SessionTranscriptRow message={message} />);
+
+  expect(typeReads).toBe(initialReads);
+});
+
+test("renders V2 subagents as navigable cards without protocol markup", () => {
+  const openSubagent = jest.fn();
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            id: "tool-subagent",
+            name: "subagent",
+            state: {
+              content: [
+                {
+                  text: '<task id="ses_child" state="running">\n<summary>Background task started</summary>\n<task_result>\nWorking\n</task_result>\n</task>',
+                  type: "text",
+                },
+              ],
+              input: {
+                background: true,
+                description: "Inspect event handling",
+                subagent_type: "explore",
+              },
+              metadata: { background: true, sessionId: "ses_child" },
+              status: "completed",
+            },
+            time: { created: 1 },
+            type: "tool",
+          },
+        ],
+        id: "msg_subagent",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+      }}
+      onOpenSubagent={openSubagent}
+    />,
+  );
+
+  // Two lines: the title, then "@agent · Background · state" beside a state glyph.
+  expect(screen.getByText(/@explore · Background ·/)).toBeOnTheScreen();
+  expect(screen.getByText("Inspect event handling")).toBeOnTheScreen();
+  expect(screen.getByText("Running")).toHaveStyle({ color: palette.info });
+  expect(screen.getByTestId("subagent-glyph-working")).toBeOnTheScreen();
+  expect(screen.queryByText("subagent / Completed")).toBeNull();
+  expect(screen.queryByText(/<task/)).toBeNull();
+  expect(screen.getByTestId("subagent-card")).toHaveStyle({
+    borderColor: palette.border,
+    borderRadius: 12,
+    borderWidth: 1,
+    padding: 12,
+  });
+  expect(screen.getByText("Inspect event handling")).toHaveStyle(typography.headline);
+
+  const card = screen.getByRole("button", {
+    name: "Background subagent, Inspect event handling, @explore, Running",
+  });
+  expect(card.props.accessibilityHint).toBe("Opens the subagent session");
+  fireEvent.press(card);
+  expect(openSubagent).toHaveBeenCalledWith("ses_child");
+  // The meta line is part of the same card target.
+  fireEvent.press(screen.getByText(/@explore · Background ·/));
+  expect(openSubagent).toHaveBeenCalledTimes(2);
+
+  // The launch acknowledgement ("Working") is not a result, so a running card offers none.
+  expect(screen.queryByRole("button", { name: "Show result" })).toBeNull();
+  expect(screen.queryByText("Working")).toBeNull();
+  expect(screen.queryByText(/task_result/)).toBeNull();
+});
+
+test("background subagent launches stay running until the child reports a result", () => {
+  const launch: SessionMessageInfo = {
+    agent: "build",
+    content: [
+      {
+        id: "tool-subagent",
+        name: "subagent",
+        state: {
+          content: [
+            {
+              text: "The subagent is working in the background (sessionID: ses_child). You will be notified automatically when it finishes.",
+              type: "text",
+            },
+          ],
+          input: { agent: "general", background: true, description: "Restyle Sessions list" },
+          metadata: { sessionID: "ses_child", status: "running", truncated: false },
+          status: "completed",
+        },
+        time: { created: 1 },
+        type: "tool",
+      },
+    ],
+    id: "msg_launch",
+    model: { id: "model-1", providerID: "provider" },
+    time: { completed: 1, created: 1 },
+    type: "assistant",
+  };
+  const notification: SessionMessageInfo = {
+    id: "msg_notice",
+    metadata: { childID: "ses_child", source: "subagent", state: "completed" },
+    text: '<subagent sessionID="ses_child" state="completed" description="Restyle Sessions list">\nDone\n</subagent>',
+    time: { created: 2 },
+    type: "synthetic",
+  };
+  const row = (messages: SessionMessageInfo[]) => (
+    <SessionSubagentStates.Provider value={subagentStates(messages, { ses_child: {} })}>
+      <SessionTranscriptRow message={launch} />
+    </SessionSubagentStates.Provider>
+  );
+  const view = render(row([launch]));
+
+  expect(screen.getByLabelText(/^Background subagent, /)).toBeOnTheScreen();
+  expect(screen.getByText("Running")).toBeOnTheScreen();
+
+  const announce = jest.spyOn(AccessibilityInfo, "announceForAccessibility");
+  announce.mockClear();
+  view.rerender(row([notification, launch]));
+  expect(screen.getByText("Completed")).toBeOnTheScreen();
+  expect(screen.getByTestId("subagent-card")).toHaveStyle({ borderColor: palette.border });
+  // The background-work chip owns this announcement; the card stays quiet so it is read once.
+  expect(announce).not.toHaveBeenCalled();
+  expect(screen.getByText(/@general · Background/).props.accessibilityLiveRegion).toBe("none");
+  announce.mockRestore();
+
+  // Leaving the active list with no reported outcome is announced neutrally, never as success.
+  const inferred = (active: Record<string, unknown>) => (
+    <SessionSubagentStates.Provider value={subagentStates([launch], active, "ses_parent")}>
+      <SessionTranscriptRow message={launch} />
+    </SessionSubagentStates.Provider>
+  );
+  view.rerender(inferred({ ses_child: {} }));
+  view.rerender(inferred({}));
+  expect(screen.getByText("Finished")).toBeOnTheScreen();
+});
+
+test("projects injected background results into subagent cards", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content: [
+          {
+            text: '<task id="ses_child" state="completed">\n<summary>Background task completed: inspect code</summary>\n<task_result>\nUseful result\n</task_result>\n</task>',
+            type: "text",
+          },
+        ],
+        id: "msg_background_result",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 2 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Background task completed: inspect code")).toBeOnTheScreen();
+  expect(screen.getByText("Completed")).toBeOnTheScreen();
+  expect(
+    screen.getByLabelText(/^Background subagent, Background task completed/),
+  ).toBeOnTheScreen();
+  expect(screen.getByTestId("subagent-card")).toHaveStyle({
+    backgroundColor: palette.card,
+    borderColor: palette.border,
+    borderRadius: 12,
+    padding: 12,
+  });
+  expect(screen.queryByText(/<task/)).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Show result" }));
+  expect(screen.getByText("Useful result")).toBeOnTheScreen();
+});
+
+test("lets attachment and disclosure controls reflow at accessibility text sizes", () => {
+  const user = messages.find(
+    (message): message is Extract<SessionMessageInfo, { type: "user" }> => message.type === "user",
+  );
+  const assistant = messages.find(
+    (message): message is Extract<SessionMessageInfo, { type: "assistant" }> =>
+      message.type === "assistant",
+  );
+  if (!user || !assistant) throw new Error("TEST_FIXTURE_MISSING");
+
+  render(
+    <View>
+      <SessionTranscriptRow largeText message={user} />
+      <SessionTranscriptRow largeText message={assistant} />
+    </View>,
+  );
+
+  expect(screen.getByText("note.txt").props.numberOfLines).toBeUndefined();
+  expect(screen.getByRole("button", { name: /Retry 2 scheduled/ })).toHaveStyle({
+    flexDirection: "column",
+  });
+});
+
+test("caps child rows within one projected message", () => {
+  const content = Array.from({ length: 65 }, (_, ordinal) => ({
+    text: `Part ${ordinal}`,
+    type: "text" as const,
+  }));
+  render(
+    <SessionTranscriptRow
+      message={{
+        agent: "build",
+        content,
+        id: "msg_many_parts",
+        model: { id: "model-1", providerID: "provider" },
+        time: { created: 1 },
+        type: "assistant",
+      }}
+    />,
+  );
+
+  expect(screen.getByText("Part 63")).toBeOnTheScreen();
+  expect(screen.queryByText("Part 64")).toBeNull();
+  expect(screen.getByText("Additional message parts omitted on this device.")).toBeOnTheScreen();
+});
+
+test("running shell output follows new lines until the user scrolls up", () => {
+  const shell = (output: string, status: "running" | "exited"): SessionMessageInfo => ({
+    command: "pnpm test",
+    id: "msg_shell_follow",
+    output: { cursor: output.length, output, size: output.length, truncated: false },
+    shellID: "shell-follow",
+    status,
+    time: { created: 8 },
+    type: "shell",
+  });
+  const view = render(<SessionTranscriptRow message={shell("line 1", "running")} />);
+  fireEvent.press(screen.getByRole("button", { name: /Running.*Show/ }));
+  const scroll = () => screen.UNSAFE_getByProps({ accessibilityLabel: "Shell output" });
+  const scrollToEnd = jest.fn();
+  scroll().instance.scrollToEnd = scrollToEnd;
+
+  fireEvent(scroll(), "contentSizeChange", 320, 400);
+  expect(scrollToEnd).toHaveBeenCalledTimes(1);
+
+  fireEvent.scroll(scroll(), {
+    nativeEvent: {
+      contentOffset: { x: 0, y: 40 },
+      contentSize: { height: 400, width: 320 },
+      layoutMeasurement: { height: 240, width: 320 },
+    },
+  });
+  view.rerender(<SessionTranscriptRow message={shell("line 1\nline 2", "running")} />);
+  fireEvent(scroll(), "contentSizeChange", 320, 420);
+  expect(scrollToEnd).toHaveBeenCalledTimes(1);
+
+  fireEvent.scroll(scroll(), {
+    nativeEvent: {
+      contentOffset: { x: 0, y: 170 },
+      contentSize: { height: 420, width: 320 },
+      layoutMeasurement: { height: 240, width: 320 },
+    },
+  });
+  fireEvent(scroll(), "contentSizeChange", 320, 440);
+  expect(scrollToEnd).toHaveBeenCalledTimes(2);
+
+  view.rerender(<SessionTranscriptRow message={shell("line 1\nline 2", "exited")} />);
+  fireEvent(scroll(), "contentSizeChange", 320, 460);
+  expect(scrollToEnd).toHaveBeenCalledTimes(2);
+});
+
+test("the shell copy button sits beside the command instead of over the output", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        command: "pnpm test",
+        id: "msg_shell_copy",
+        output: { cursor: 1, output: "shell output", size: 1, truncated: false },
+        shellID: "shell-copy",
+        status: "exited",
+        time: { created: 8 },
+        type: "shell",
+      }}
+    />,
+  );
+  fireEvent.press(screen.getByRole("button", { name: /Ran.*Show/ }));
+  const copy = screen.getByRole("button", { name: "Copy shell output" });
+  let header = copy.parent;
+  while (header && StyleSheet.flatten(header.props.style)?.flexDirection !== "row") {
+    header = header.parent;
+  }
+  expect(header).toContainElement(screen.getAllByText("pnpm test").at(-1) ?? null);
+  expect(screen.getByLabelText("Shell output")).not.toContainElement(copy);
+});
+
+test("pending prompt status is announced on iOS as it changes", () => {
+  const announce = jest.spyOn(AccessibilityInfo, "announceForAccessibility");
+  const preview = {
+    createdAtMs: 1,
+    id: "pending",
+    status: "sending" as const,
+    text: "Fix the build",
+    type: "pending-prompt" as const,
+  };
+  const view = render(<PendingPromptRow preview={preview} />);
+  expect(announce).toHaveBeenLastCalledWith("Sending");
+  view.rerender(<PendingPromptRow preview={{ ...preview, status: "queued" }} />);
+  expect(announce).toHaveBeenLastCalledWith("Queued");
+  expect(screen.getByText("Queued").props.accessibilityLiveRegion).toBe("polite");
+  announce.mockRestore();
+});
+
+test("shows a model change inline with its variant, with nothing to expand", () => {
+  render(
+    <SessionTranscriptRow
+      message={{
+        id: "msg_model",
+        model: { id: "model-2", providerID: "provider", variant: "high" },
+        time: { created: 2 },
+        type: "model-switched",
+      }}
+    />,
+  );
+  expect(screen.getByText(/Model changed to/)).toHaveTextContent("Model changed to model-2 · high");
+  // Screen readers hear a pause, not the separator glyph.
+  expect(screen.getByText(/Model changed to/).props.accessibilityLabel).toBe(
+    "Model changed to model-2, high",
+  );
+  expect(screen.queryByRole("button")).toBeNull();
+});
+
+test("transcript notices and disclosure labels match the chat activity size", () => {
+  render(
+    <View>
+      <SessionTranscriptRow
+        message={{ agent: "build", id: "msg_agent", time: { created: 1 }, type: "agent-switched" }}
+      />
+      <SessionTranscriptRow
+        detailed
+        message={{
+          id: "msg_model",
+          model: { id: "model-2", providerID: "provider" },
+          time: { created: 2 },
+          type: "model-switched",
+        }}
+      />
+      <SessionTranscriptRow
+        message={{
+          agent: "build",
+          content: [
+            { text: "Line one\nLine two", time: { completed: 2, created: 1 }, type: "reasoning" },
+          ],
+          id: "msg_reasoning",
+          model: { id: "model-1", providerID: "provider" },
+          time: { completed: 2, created: 1 },
+          type: "assistant",
+        }}
+      />
+    </View>,
+  );
+  expect(screen.getByText(/Model changed to/)).toHaveStyle({
+    fontSize: typography.chatActivity.fontSize,
+  });
+  expect(screen.getByText(/Agent changed to/)).toHaveStyle({
+    fontSize: typography.chatActivity.fontSize,
+  });
+  expect(screen.getByText("Thought")).toHaveStyle({ fontSize: typography.chatActivity.fontSize });
+  expect(screen.getByRole("button", { name: /Thought/ })).toHaveStyle({ minHeight: 48 });
+});
+
+type UserMessage = Extract<SessionMessageInfo, { type: "user" }>;
+type AssistantMessage = Extract<SessionMessageInfo, { type: "assistant" }>;
+type AssistantTool = Extract<AssistantMessage["content"][number], { type: "tool" }>;
+type CompletedToolState = Extract<AssistantTool["state"], { status: "completed" }>;
+
+function assistantWith(content: AssistantMessage["content"]): AssistantMessage {
+  return {
+    agent: "build",
+    content,
+    id: "msg_tools",
+    model: { id: "model-1", providerID: "provider" },
+    time: { created: 1 },
+    type: "assistant",
+  };
+}
+
+function completedTool(
+  id: string,
+  name: string,
+  input: CompletedToolState["input"] = {},
+  content: CompletedToolState["content"] = [{ text: "Done", type: "text" }],
+): AssistantTool {
+  return {
+    id,
+    name,
+    state: { content, input, status: "completed" },
+    time: { created: 1 },
+    type: "tool",
+  };
+}
+
+test("labels file, agent and skill attachments and skips inline images", () => {
+  const message = {
+    agents: [{ name: "explore" }],
+    files: [
+      {
+        data: "cmVwb3J0",
+        mime: "application/pdf",
+        name: " /tmp/report.pdf ",
+        source: { type: "inline" },
+      },
+      { data: "bm90ZQ==", mime: "text/plain", source: { type: "inline" } },
+      { data: "aW1hZ2U=", mime: "image/png", name: "screen.png", source: { type: "inline" } },
+    ],
+    id: "msg_attachments",
+    skills: [{ id: "review", name: "Review" }],
+    text: "See attached",
+    time: { created: 1 },
+    type: "user",
+  } as UserMessage;
+  render(<SessionTranscriptRow message={message} />);
+
+  expect(screen.getByLabelText("4 attachments")).toBeOnTheScreen();
+  expect(screen.getByText("report.pdf")).toBeOnTheScreen();
+  expect(screen.getByText("File attachment")).toBeOnTheScreen();
+  expect(screen.getByText("@explore")).toBeOnTheScreen();
+  expect(screen.getByText("Skill: Review")).toBeOnTheScreen();
+  expect(screen.queryByText("screen.png")).toBeNull();
+  expect(screen.queryByText("Additional attachments omitted.")).toBeNull();
+});
+
+test("caps attachment labels and counts the omitted attachments", () => {
+  const files = (count: number, prefix: string) =>
+    Array.from({ length: count }, (_, index) => ({
+      data: "ZmlsZQ==",
+      mime: "text/plain",
+      name: `${prefix}-${index}.txt`,
+      source: { type: "inline" as const },
+    }));
+  const user = (patch: Partial<UserMessage>) =>
+    ({
+      id: "msg_many",
+      text: "Files",
+      time: { created: 1 },
+      type: "user",
+      ...patch,
+    }) as UserMessage;
+  const view = render(
+    <SessionTranscriptRow message={user({ agents: [{ name: "late" }], files: files(33, "a") })} />,
+  );
+  expect(screen.getByLabelText("34 attachments")).toBeOnTheScreen();
+  expect(screen.getByText("a-31.txt")).toBeOnTheScreen();
+  expect(screen.queryByText("a-32.txt")).toBeNull();
+  expect(screen.queryByText("@late")).toBeNull();
+  expect(screen.getByText("Additional attachments omitted.")).toBeOnTheScreen();
+
+  view.rerender(
+    <SessionTranscriptRow
+      message={user({
+        agents: [{ name: "first" }, { name: "second" }],
+        files: files(30, "b"),
+        skills: [{ id: "review", name: "Review" }] as NonNullable<UserMessage["skills"]>,
+      })}
+    />,
+  );
+  expect(screen.getByLabelText("33 attachments")).toBeOnTheScreen();
+  expect(screen.getByText("@second")).toBeOnTheScreen();
+  expect(screen.queryByText("Skill: Review")).toBeNull();
+  expect(screen.getByText("Additional attachments omitted.")).toBeOnTheScreen();
+});
+
+test.each([
+  {
+    detail: "1 file",
+    label: "Edited",
+    tools: [
+      completedTool("edit-a", "write", { path: "src/a.ts" }),
+      completedTool("edit-b", "edit", { filePath: "src/a.ts" }),
+    ],
+  },
+  {
+    detail: "2 edits",
+    label: "Edited",
+    tools: [completedTool("edit-a", "write"), completedTool("edit-b", "edit")],
+  },
+  {
+    detail: "2 commands",
+    label: "Ran shell",
+    tools: [
+      completedTool("shell-a", "shell", { command: "pnpm lint" }),
+      completedTool("shell-b", "bash", { command: "pnpm test" }),
+    ],
+  },
+  {
+    detail: "review, native-ui",
+    label: "Used Skill",
+    tools: [
+      completedTool("skill-a", "skill", { name: "review" }),
+      completedTool("skill-b", "skill", { id: "native-ui" }),
+      completedTool("skill-c", "use_skill", { skill: "review" }),
+    ],
+  },
+  {
+    detail: "2 uses",
+    label: "Used Skill",
+    tools: [completedTool("skill-a", "skill"), completedTool("skill-b", "skill")],
+  },
+  {
+    detail: "5 calls",
+    label: "Used Alpha, Beta, Gamma, +1",
+    tools: ["alpha", "beta", "alpha", "gamma", "delta"].map((name, index) =>
+      completedTool(`other-${index}`, name),
+    ),
+  },
+])("summarizes a completed $label group as $detail", ({ detail, label, tools }) => {
+  render(<SessionTranscriptRow message={assistantWith(tools)} />);
+  expect(screen.getByText(label)).toBeOnTheScreen();
+  expect(screen.getByText(detail)).toBeOnTheScreen();
+});
+
+test("labels skill calls while they load and lists file results once loaded", () => {
+  const skill = (state: AssistantTool["state"]): AssistantMessage =>
+    assistantWith([
+      { id: "tool_skill", name: " Skill ", state, time: { created: 1 }, type: "tool" },
+    ]);
+  const view = render(
+    <SessionTranscriptRow
+      detailed
+      message={skill({ input: {}, metadata: {}, status: "running" })}
+    />,
+  );
+  expect(screen.getByLabelText("Loading Skill")).toBeOnTheScreen();
+  expect(screen.queryByRole("button", { name: "Loading Skill" })).toBeNull();
+
+  view.rerender(
+    <SessionTranscriptRow
+      detailed
+      message={skill({ input: '{"name":"native-ui"}', status: "streaming" })}
+    />,
+  );
+  expect(screen.getByLabelText("Loading native-ui skill")).toBeOnTheScreen();
+
+  view.rerender(
+    <SessionTranscriptRow
+      detailed
+      message={skill({
+        content: [
+          { mime: "text/markdown", name: "SKILL.md", type: "file", uri: "file:///SKILL.md" },
+          { mime: "text/plain", type: "file", uri: "file:///notes" },
+        ],
+        input: { name: "native-ui" },
+        status: "completed",
+      })}
+    />,
+  );
+  fireEvent.press(screen.getByRole("button", { name: "Loaded native-ui skill" }));
+  expect(screen.getByLabelText("Skill content")).toBeOnTheScreen();
+  expect(screen.getByText("SKILL.md")).toBeOnTheScreen();
+  expect(screen.getByText("File result")).toBeOnTheScreen();
+});
+
+test("expanded tool calls list file results and cap long output", () => {
+  const files = Array.from({ length: 33 }, (_, index) => ({
+    mime: "text/plain",
+    name: index === 1 ? " " : `/workspace/out-${index}.txt`,
+    type: "file" as const,
+    uri: `file:///out-${index}`,
+  }));
+  render(
+    <SessionTranscriptRow
+      detailed
+      message={assistantWith([
+        completedTool("tool_files", "collect", {}, files as CompletedToolState["content"]),
+      ])}
+    />,
+  );
+  expect(screen.getByText("Used Collect")).toBeOnTheScreen();
+  expect(screen.queryByText("out-0.txt")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /Used Collect/ }));
+  expect(screen.getByText("out-0.txt")).toBeOnTheScreen();
+  expect(screen.getByText("File result")).toBeOnTheScreen();
+  expect(screen.getByText("out-31.txt")).toBeOnTheScreen();
+  expect(screen.queryByText("out-32.txt")).toBeNull();
+  expect(screen.getByText("Additional tool output omitted on this device.")).toBeOnTheScreen();
+});
+
+test("nested failed tools summarize the error until expanded", () => {
+  const failed: AssistantTool = {
+    id: "tool_failed",
+    name: "patch",
+    state: {
+      error: { message: "Patch rejected", type: "ToolError" },
+      input: { path: "src/a.ts" },
+      status: "error",
+    },
+    time: { created: 1 },
+    type: "tool",
+  };
+  const openDiff = jest.fn();
+  render(
+    <SessionTranscriptRow
+      compactActivity
+      detailed
+      message={assistantWith([failed])}
+      onOpenDiff={openDiff}
+    />,
+  );
+  expect(screen.getByText("Patch rejected")).toBeOnTheScreen();
+  expect(screen.queryByRole("button", { name: "Review current changes" })).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: /^Patch Patch rejected Show/ }));
+  expect(screen.getByText("Failed")).toBeOnTheScreen();
+  expect(screen.getByText("Patch rejected")).toBeOnTheScreen();
+  expect(screen.getByText("src/a.ts")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "Review current changes" }));
+  expect(openDiff).toHaveBeenCalledTimes(1);
+});
+
+test("subagent cards without a child session stay static and announce failures", () => {
+  const subagent = (state: AssistantTool["state"]) =>
+    assistantWith([
+      { id: "tool_subagent", name: "task", state, time: { created: 1 }, type: "tool" },
+    ]);
+  const input = { description: "Fix tests" };
+  const view = render(
+    <SessionTranscriptRow message={subagent({ input, metadata: {}, status: "running" })} />,
+  );
+  const card = screen.getByLabelText("Subagent, Fix tests, Running");
+  expect(card.props.accessibilityRole).toBeUndefined();
+  expect(card.props.accessibilityHint).toBeUndefined();
+  // Neutral frames; the glyph and label carry state.
+  expect(screen.getByTestId("subagent-card")).toHaveStyle({ borderColor: palette.border });
+  expect(screen.queryByRole("button", { name: "Show result" })).toBeNull();
+
+  const announce = jest.spyOn(AccessibilityInfo, "announceForAccessibility");
+  try {
+    view.rerender(
+      <SessionTranscriptRow
+        message={subagent({
+          error: { message: "Tests failed", type: "ToolError" },
+          input,
+          status: "error",
+        })}
+      />,
+    );
+    expect(screen.getByText("Failed")).toHaveStyle({ color: palette.danger });
+    expect(screen.getByTestId("subagent-glyph-error")).toBeOnTheScreen();
+    expect(announce).toHaveBeenCalledWith("Subagent Fix tests failed");
+  } finally {
+    announce.mockRestore();
+  }
+});
+
+test.each(["ios", "android"] as const)("subagent cards give press feedback on %s", (os) => {
+  const platform = jest.replaceProperty(Platform, "OS", os);
+  try {
+    render(
+      <SessionTranscriptRow
+        message={assistantWith([
+          {
+            id: "tool_subagent",
+            name: "subagent",
+            state: {
+              content: [{ text: "Result", type: "text" }],
+              input: { description: "Explore" },
+              metadata: { sessionId: "ses_child" },
+              status: "completed",
+            },
+            time: { created: 1 },
+            type: "tool",
+          },
+        ])}
+        onOpenSubagent={jest.fn()}
+      />,
+    );
+    const card = screen.getByRole("button", { name: "Subagent, Explore, Completed" });
+    const toggle = screen.getByRole("button", { name: "Show result" });
+    if (os === "android") {
+      expect(card.props.nativeBackgroundAndroid).toMatchObject({ borderless: false });
+      expect(toggle.props.nativeBackgroundAndroid).toMatchObject({ borderless: false });
+    } else {
+      expect(card.props.nativeBackgroundAndroid).toBeUndefined();
+      expect(toggle.props.nativeBackgroundAndroid).toBeUndefined();
+    }
+
+    // The card's pressable area dims on iOS; Android uses the ripple.
+    fireEvent(card, "pressIn");
+    if (os === "ios") {
+      expect(card).toHaveStyle({ opacity: pressedOpacity });
+    } else {
+      expect(card).not.toHaveStyle({ opacity: pressedOpacity });
+    }
+    fireEvent(card, "pressOut");
+    expect(card).not.toHaveStyle({ opacity: pressedOpacity });
+  } finally {
+    platform.restore();
+  }
+});
+
+test("background subagent launches fold into the tool group; blocking ones keep a card", () => {
+  const launch = (background: boolean): SessionMessageInfo =>
+    ({
+      id: `msg_${background ? "background" : "blocking"}`,
+      type: "assistant",
+      agent: "build",
+      model: { id: "model", providerID: "provider" },
+      time: { created: 1, completed: 2 },
+      content: [
+        {
+          id: `tool_${background}`,
+          name: "subagent",
+          type: "tool",
+          time: { created: 1 },
+          state: {
+            status: background ? "completed" : "running",
+            input: { background, description: "Review", subagent_type: "review" },
+            metadata: { sessionID: "ses_child" },
+            ...(background
+              ? { content: [{ type: "text", text: "Working in the background." }] }
+              : {}),
+          },
+        },
+      ],
+    }) as SessionMessageInfo;
+  expect(groupTranscriptMessages([launch(true)], false, true)).toEqual([
+    expect.objectContaining({ type: "activity-group", count: 1 }),
+  ]);
+  expect(groupTranscriptMessages([launch(false)], false, true)).toEqual([
+    expect.objectContaining({ id: "msg_blocking", type: "assistant" }),
+  ]);
+});

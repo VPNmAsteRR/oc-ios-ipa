@@ -1,0 +1,92 @@
+name: Build unsigned iOS IPA
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  build-ipa:
+    runs-on: macos-15
+    timeout-minutes: 90
+    env:
+      CI: "1"
+      OPENCODE2_MOBILE_DISABLE_LOCAL_DEPLOYMENT: "1"
+      OPENCODE2_MOBILE_APP_NAME: "OpenCode"
+      OPENCODE2_MOBILE_ALLOW_DEVELOPMENT_HTTP: "false"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.21.0
+          run_install: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+
+      - name: Show toolchain
+        run: |
+          node -v
+          pnpm -v
+          xcodebuild -version
+          pod --version
+
+      - run: pnpm install --frozen-lockfile
+
+      - name: Expo prebuild (iOS)
+        working-directory: apps/mobile
+        run: npx expo prebuild --platform ios --no-install
+
+      - name: CocoaPods install
+        working-directory: apps/mobile/ios
+        run: pod install --repo-update
+
+      - name: Detect workspace and scheme
+        id: xc
+        working-directory: apps/mobile/ios
+        run: |
+          WS=$(ls -d *.xcworkspace | head -1)
+          SCHEME=$(xcodebuild -workspace "$WS" -list -json | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>{const j=JSON.parse(d);const w=j.workspace??Object.values(j)[0];const s=w.schemes[0];console.log(s)})')
+          echo "workspace=$WS" >> "$GITHUB_OUTPUT"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "WS=$WS SCHEME=$SCHEME"
+
+      - name: Archive (unsigned)
+        working-directory: apps/mobile/ios
+        run: |
+          xcodebuild \
+            -workspace "${{ steps.xc.outputs.workspace }}" \
+            -scheme "${{ steps.xc.outputs.scheme }}" \
+            -configuration Release \
+            -sdk iphoneos \
+            -derivedDataPath build \
+            -archivePath "$PWD/build/OpenCode.xcarchive" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            EXPANDED_CODE_SIGN_IDENTITY="" \
+            archive
+
+      - name: Package Payload into IPA
+        working-directory: apps/mobile/ios
+        run: |
+          set -euo pipefail
+          APP=$(find build/OpenCode.xcarchive/Products/Applications -maxdepth 1 -name '*.app' | head -1)
+          echo "app=$APP"
+          rm -rf out && mkdir -p out/Payload
+          cp -R "$APP" out/Payload/
+          cd out
+          zip -qry ../OpenCode-unsigned.ipa Payload
+          cd ..
+          ls -lh OpenCode-unsigned.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: OpenCode-unsigned-ipa
+          path: apps/mobile/ios/OpenCode-unsigned.ipa
+          if-no-files-found: error

@@ -1,0 +1,554 @@
+export type FakeOpenCodeApiOptions = {
+  agents?: unknown[];
+  commands?: unknown[];
+  configEntries?: unknown[];
+  eventFrame?: string;
+  failures?: Record<string, { body: unknown; status: number }>;
+  files?: unknown[];
+  directoryEntries?: unknown[];
+  forms?: unknown[];
+  location?: {
+    directory: string;
+    project: { canonical: string; directory: string; id: string };
+    workspaceID?: string;
+  };
+  models?: unknown[];
+  mcpServers?: unknown[];
+  messagePageSize?: number;
+  messages?: Record<string, unknown[]>;
+  pageSize?: number;
+  permissions?: unknown[];
+  projects?: unknown[];
+  serverInfoPath?: "/api/info" | "/api/status";
+  sessions?: FakeSession[];
+  skills?: unknown[];
+  shells?: Record<string, { info: unknown; output: string }>;
+  // Results for POST /api/shell keyed by command. Unknown commands exit 127. pollsBeforeExit
+  // counts the GET requests that still report the command as running.
+  shellCommands?: Record<
+    string,
+    { exit?: number; output: string; pollsBeforeExit?: number; status?: string }
+  >;
+  shellOutputResponse?: unknown;
+  vcs?: unknown;
+  vcsDiff?: unknown[];
+};
+
+export type FakeOpenCodeRequest = {
+  jsonBody?: unknown;
+  method: string;
+  path: string;
+  query: Record<string, string[]>;
+};
+
+export type FakeSession = {
+  agent?: string;
+  cost: number;
+  id: string;
+  location: { directory: string; workspaceID?: string };
+  model?: { id: string; providerID: string; variant?: string };
+  outcome?: "failed" | "interrupted" | "succeeded";
+  parentID?: string;
+  projectID: string;
+  time: {
+    archived?: number;
+    busy?: number;
+    created: number;
+    idle?: number;
+    updated: number;
+    viewed?: number;
+  };
+  title?: string;
+  tokens: {
+    cache: { read: number; write: number };
+    input: number;
+    output: number;
+    reasoning: number;
+  };
+};
+
+export function createFakeOpenCodeApi(options: FakeOpenCodeApiOptions = {}) {
+  const requests: FakeOpenCodeRequest[] = [];
+  let cancelledStreams = 0;
+  let eventGenerations = 0;
+  let nextSession = 1;
+  let sessions = [...(options.sessions ?? [])];
+  let pendingForms = [...(options.forms ?? [])];
+  const formStates = new Map<string, unknown>();
+  const mcpByLocation = new Map<string, unknown[]>();
+  let nextShell = 1;
+  const createdShells = new Map<
+    string,
+    { info: Record<string, unknown>; output: string; pollsBeforeExit: number; final: string }
+  >();
+  const removedShells = new Set<string>();
+
+  const fetch: typeof globalThis.fetch = async (input, init) => {
+    const url = new URL(
+      typeof input === "string" ? input : input instanceof URL ? input : input.url,
+    );
+    const method = init?.method ?? "GET";
+    const jsonBody = await readJsonBody(init?.body);
+    const query: Record<string, string[]> = {};
+    for (const [key, value] of url.searchParams) {
+      const values = query[key] ?? [];
+      values.push(value);
+      query[key] = values;
+    }
+    requests.push({
+      ...(jsonBody === undefined ? {} : { jsonBody }),
+      method,
+      path: url.pathname,
+      query,
+    });
+
+    const failure = options.failures?.[url.pathname];
+    if (failure) return json(failure.body, failure.status);
+
+    if (url.pathname === (options.serverInfoPath ?? "/api/info")) {
+      return json({
+        pid: 42,
+        version: "test",
+        urls: ["http://fake.invalid"],
+        ...(url.pathname === "/api/info" ? { paths: { tmp: "/tmp/fixture" } } : {}),
+      });
+    }
+    if (url.pathname === "/api/project") {
+      return json(options.projects ?? []);
+    }
+    if (url.pathname === "/api/location") {
+      const requestedDirectory = url.searchParams.get("location[directory]");
+      const requestedWorkspace = url.searchParams.get("location[workspace]");
+      const fallback = options.location ?? {
+        directory: "/workspace",
+        project: { canonical: "/workspace", directory: "/workspace", id: "project-test" },
+      };
+      return json({
+        ...fallback,
+        directory: requestedDirectory ?? fallback.directory,
+        ...(requestedWorkspace ? { workspaceID: requestedWorkspace } : {}),
+      });
+    }
+    if (url.pathname === "/api/vcs") {
+      return json({
+        data: options.vcs ?? { branch: {} },
+        location: resolvedLocation(options, url),
+      });
+    }
+    if (url.pathname === "/api/vcs/diff") {
+      return json({ data: options.vcsDiff ?? [], location: resolvedLocation(options, url) });
+    }
+    const mcpMatch = url.pathname.match(
+      /^\/api\/experimental\/mcp\/([^/]+)\/(connect|disconnect)$/,
+    );
+    if (url.pathname === "/api/mcp" || (mcpMatch && method === "POST")) {
+      const location = resolvedLocation(options, url);
+      const key = JSON.stringify(location);
+      const servers = mcpByLocation.get(key) ?? structuredClone(options.mcpServers ?? []);
+      mcpByLocation.set(key, servers);
+      if (!mcpMatch) return json({ location, data: servers });
+      const name = decodeURIComponent(mcpMatch[1] ?? "");
+      const server = servers.find(
+        (entry): entry is { name: string; status: unknown } =>
+          typeof entry === "object" && entry !== null && "name" in entry && entry.name === name,
+      );
+      if (!server)
+        return json(
+          { _tag: "McpServerNotFoundError", server: name, message: "MCP server not found" },
+          404,
+        );
+      server.status = { status: mcpMatch[2] === "connect" ? "connected" : "disabled" };
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/api/shell" && method === "POST") {
+      const body = isRecord(jsonBody) ? jsonBody : {};
+      const command = typeof body.command === "string" ? body.command : "";
+      const result = options.shellCommands?.[command] ?? {
+        exit: 127,
+        output: "sh: gh: command not found\n",
+      };
+      const id = `sh_fake_${nextShell++}`;
+      const final = result.status ?? "exited";
+      const pollsBeforeExit = result.pollsBeforeExit ?? 0;
+      const info: Record<string, unknown> = {
+        command,
+        cwd: resolvedLocation(options, url).directory,
+        file: `/tmp/${id}.out`,
+        id,
+        metadata: isRecord(body.metadata) ? body.metadata : {},
+        shell: "/bin/sh",
+        status: pollsBeforeExit > 0 ? "running" : final,
+        time: { started: 0 },
+        ...(pollsBeforeExit > 0 || result.exit === undefined ? {} : { exit: result.exit }),
+      };
+      createdShells.set(id, {
+        final,
+        info: { ...info, ...(result.exit === undefined ? {} : { exit: result.exit }) },
+        output: result.output,
+        pollsBeforeExit,
+      });
+      return json({ location: resolvedLocation(options, url), data: info });
+    }
+    const shellMatch = url.pathname.match(/^\/api\/shell\/([^/]+)(\/output)?$/);
+    if (shellMatch && method === "DELETE") {
+      const id = decodeURIComponent(shellMatch[1] ?? "");
+      const configured = Boolean(options.shells?.[id]) && !removedShells.has(id);
+      if (!createdShells.delete(id) && !configured) {
+        return json({ _tag: "ShellNotFoundError", id, message: "Shell not found" }, 404);
+      }
+      // Removing a shell stops it and drops its record, as on the server.
+      removedShells.add(id);
+      return new Response(null, { status: 204 });
+    }
+    if (shellMatch && method === "GET") {
+      const id = decodeURIComponent(shellMatch[1] ?? "");
+      if (removedShells.has(id)) {
+        return json({ _tag: "ShellNotFoundError", id, message: "Shell not found" }, 404);
+      }
+      const created = createdShells.get(id);
+      if (created && !shellMatch[2]) {
+        const running = created.pollsBeforeExit > 0;
+        if (running) created.pollsBeforeExit -= 1;
+        return json({
+          location: resolvedLocation(options, url),
+          data: running
+            ? { ...created.info, exit: undefined, status: "running" }
+            : { ...created.info, status: created.final },
+        });
+      }
+      const shell = options.shells?.[id] ?? created;
+      if (!shell) return json({ _tag: "ShellNotFoundError", id, message: "Shell not found" }, 404);
+      if (!shellMatch[2])
+        return json({ location: resolvedLocation(options, url), data: shell.info });
+      const bytes = new TextEncoder().encode(shell.output);
+      const start = Math.min(Number(url.searchParams.get("cursor") ?? 0), bytes.length);
+      const end = Math.min(start + Number(url.searchParams.get("limit") ?? 65536), bytes.length);
+      return json({
+        location: resolvedLocation(options, url),
+        data: options.shellOutputResponse ?? {
+          output: new TextDecoder().decode(bytes.slice(start, end)),
+          cursor: end,
+          size: bytes.length,
+          truncated: false,
+        },
+      });
+    }
+    if (url.pathname === "/api/agent") {
+      return json({ location: resolvedLocation(options, url), data: options.agents ?? [] });
+    }
+    if (url.pathname === "/api/command") {
+      return json({ location: resolvedLocation(options, url), data: options.commands ?? [] });
+    }
+    if (url.pathname === "/api/config") {
+      return json(options.configEntries ?? []);
+    }
+    if (url.pathname === "/api/model") {
+      return json({ location: resolvedLocation(options, url), data: options.models ?? [] });
+    }
+    if (url.pathname === "/api/skill") {
+      return json({ location: resolvedLocation(options, url), data: options.skills ?? [] });
+    }
+    if (url.pathname === "/api/permission/request") {
+      return json({ location: resolvedLocation(options, url), data: options.permissions ?? [] });
+    }
+    if (url.pathname === "/api/form") {
+      return json({ location: resolvedLocation(options, url), data: pendingForms });
+    }
+    if (url.pathname === "/api/fs/find") {
+      return json({ location: resolvedLocation(options, url), data: options.files ?? [] });
+    }
+    if (url.pathname === "/api/fs/list") {
+      return json({
+        location: resolvedLocation(options, url),
+        data: options.directoryEntries ?? [],
+      });
+    }
+    const formMatch = url.pathname.match(
+      /^\/api\/session\/([^/]+)\/form\/([^/]+)(?:\/(reply|cancel))?$/,
+    );
+    if (formMatch) {
+      const sessionID = formMatch[1] ?? "";
+      const formID = formMatch[2] ?? "";
+      const operation = method === "DELETE" ? "cancel" : formMatch[3];
+      const pendingIndex = pendingForms.findIndex(
+        (form) => isRecord(form) && form.id === formID && form.sessionID === sessionID,
+      );
+      if (operation === undefined && method === "GET") {
+        const settled = formStates.get(`${sessionID}\u0000${formID}`);
+        const form = options.forms?.find(
+          (item) => isRecord(item) && item.id === formID && item.sessionID === sessionID,
+        );
+        if (isRecord(form) && (settled || pendingIndex >= 0)) {
+          return json({ data: { ...form, state: settled ?? { status: "pending" } } });
+        }
+        return json({ _tag: "FormNotFoundError", message: "Not found" }, 404);
+      }
+      if (
+        (operation === "reply" && method === "POST") ||
+        (operation === "cancel" && method === "DELETE")
+      ) {
+        if (pendingIndex < 0) {
+          return formStates.has(`${sessionID}\u0000${formID}`)
+            ? json({ _tag: "FormAlreadySettledError", message: "Settled" }, 409)
+            : json({ _tag: "FormNotFoundError", message: "Not found" }, 404);
+        }
+        if (operation === "reply" && (!isRecord(jsonBody) || !isRecord(jsonBody.answer))) {
+          return json({ _tag: "FormInvalidAnswerError", message: "Invalid answer" }, 400);
+        }
+        pendingForms = pendingForms.filter((_form, index) => index !== pendingIndex);
+        formStates.set(
+          `${sessionID}\u0000${formID}`,
+          operation === "reply"
+            ? { answer: isRecord(jsonBody) ? jsonBody.answer : {}, status: "answered" }
+            : { status: "cancelled" },
+        );
+        return new Response(null, { status: 204 });
+      }
+    }
+    if (url.pathname === "/api/session/active") {
+      return json({});
+    }
+    if (url.pathname === "/api/session" && method === "POST") {
+      const body = isRecord(jsonBody) ? jsonBody : {};
+      const location = isRecord(body.location) ? body.location : {};
+      const now = Date.now();
+      const session: FakeSession = {
+        cost: 0,
+        id: typeof body.id === "string" ? body.id : `ses_fake_${nextSession++}`,
+        location: {
+          directory: typeof location.directory === "string" ? location.directory : "/workspace",
+          ...(typeof location.workspaceID === "string"
+            ? { workspaceID: location.workspaceID }
+            : {}),
+        },
+        projectID: options.location?.project.id ?? "project-test",
+        time: { created: now, updated: now },
+        ...(typeof body.title === "string" ? { title: body.title } : {}),
+        ...(typeof body.agent === "string" ? { agent: body.agent } : {}),
+        ...(isModelRef(body.model) ? { model: body.model } : {}),
+        tokens: { cache: { read: 0, write: 0 }, input: 0, output: 0, reasoning: 0 },
+      };
+      sessions = [session, ...sessions];
+      return json({ data: session });
+    }
+    if (url.pathname === "/api/session" && method === "GET") {
+      const search = url.searchParams.get("search")?.toLocaleLowerCase();
+      const directory = url.searchParams.get("directory");
+      const project = url.searchParams.get("project");
+      const parentID = url.searchParams.get("parentID");
+      const archived = url.searchParams.get("archived") === "true";
+      const workspace = url.searchParams.get("workspace");
+      const cursor = url.searchParams.get("cursor");
+      const offset = cursor?.startsWith("fake:") ? Number(cursor.slice(5)) : 0;
+      const limit = Number(url.searchParams.get("limit")) || options.pageSize || 50;
+      const filtered = sessions
+        .filter((session) => !directory || session.location.directory === directory)
+        .filter((session) => !project || session.projectID === project)
+        .filter((session) => {
+          if (parentID === null) return true;
+          if (parentID === "null") return session.parentID === undefined;
+          return session.parentID === parentID;
+        })
+        .filter((session) => !workspace || session.location.workspaceID === workspace)
+        // Like the server, the list leaves archived sessions out unless asked for them.
+        .filter((session) => (session.time.archived !== undefined) === archived)
+        .filter((session) => !search || (session.title ?? "").toLocaleLowerCase().includes(search))
+        .sort((first, second) => second.time.updated - first.time.updated);
+      const data = filtered.slice(offset, offset + limit);
+      const next =
+        offset + data.length < filtered.length ? `fake:${offset + data.length}` : undefined;
+      return json({ cursor: { ...(next ? { next } : {}) }, data });
+    }
+    const messagesMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/message$/);
+    if (messagesMatch && method === "GET") {
+      const sessionID = messagesMatch[1] ?? "";
+      const cursor = url.searchParams.get("cursor");
+      const cursorParts = cursor?.split(":");
+      if (
+        cursor &&
+        (cursorParts?.length !== 3 ||
+          cursorParts[0] !== "message" ||
+          (cursorParts[1] !== "asc" && cursorParts[1] !== "desc") ||
+          !Number.isInteger(Number(cursorParts[2])) ||
+          Number(cursorParts[2]) < 0)
+      ) {
+        return json({ _tag: "InvalidRequestError", message: "Invalid cursor" }, 400);
+      }
+      if (
+        !Object.hasOwn(options.messages ?? {}, sessionID) &&
+        !sessions.some((session) => session.id === sessionID)
+      ) {
+        return json({ _tag: "SessionNotFoundError", message: "Not found" }, 404);
+      }
+      const cursorOrder = cursorParts?.[1] === "asc" ? "asc" : "desc";
+      const offset = cursorParts?.[0] === "message" ? Number(cursorParts[2]) : 0;
+      const limit =
+        Number(url.searchParams.get("limit")) || options.messagePageSize || options.pageSize || 50;
+      const order = cursor ? cursorOrder : url.searchParams.get("order") === "asc" ? "asc" : "desc";
+      const source = [...(options.messages?.[sessionID] ?? [])].sort(
+        (first, second) => messageCreated(first) - messageCreated(second),
+      );
+      if (order === "desc") source.reverse();
+      const data = source.slice(offset, offset + limit);
+      const next =
+        offset + data.length < source.length
+          ? `message:${order}:${offset + data.length}`
+          : undefined;
+      const previous = offset > 0 ? `message:${order}:${Math.max(0, offset - limit)}` : undefined;
+      return json({
+        cursor: {
+          ...(next ? { next } : {}),
+          ...(previous ? { previous } : {}),
+        },
+        data,
+      });
+    }
+    const commandMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/command$/);
+    if (commandMatch && method === "POST") {
+      return new Response(null, { status: 204 });
+    }
+    const interruptMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/interrupt$/);
+    if (interruptMatch && method === "POST") {
+      return json({ interrupted: true });
+    }
+    const sessionMatch = url.pathname.match(/^\/api\/session\/([^/]+)$/);
+    if (sessionMatch && method === "GET") {
+      const session = sessions.find((candidate) => candidate.id === sessionMatch[1]);
+      return session
+        ? json({ data: session })
+        : json({ _tag: "SessionNotFoundError", message: "Not found" }, 404);
+    }
+    if (sessionMatch && method === "PATCH") {
+      const index = sessions.findIndex((candidate) => candidate.id === sessionMatch[1]);
+      if (index < 0) return json({ _tag: "SessionNotFoundError", message: "Not found" }, 404);
+      const current = sessions[index];
+      if (current && isRecord(jsonBody) && typeof jsonBody.title === "string") {
+        sessions[index] = {
+          ...current,
+          time: { ...current.time, updated: Date.now() },
+          title: jsonBody.title,
+        };
+      }
+      const renamed = sessions[index];
+      if (renamed && isRecord(jsonBody) && typeof jsonBody.archived === "boolean") {
+        const { archived: _archived, ...time } = renamed.time;
+        sessions[index] = {
+          ...renamed,
+          time: jsonBody.archived ? { ...time, archived: Date.now() } : time,
+        };
+      }
+      return new Response(null, { status: 204 });
+    }
+    const viewMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/view$/);
+    if (viewMatch && method === "POST") {
+      const index = sessions.findIndex((candidate) => candidate.id === viewMatch[1]);
+      const current = sessions[index];
+      if (!current) return json({ _tag: "SessionNotFoundError", message: "Not found" }, 404);
+      if (isRecord(jsonBody) && typeof jsonBody.idle === "number") {
+        sessions[index] = { ...current, time: { ...current.time, viewed: jsonBody.idle } };
+      }
+      return new Response(null, { status: 204 });
+    }
+    if (sessionMatch && method === "DELETE") {
+      const rootID = sessionMatch[1];
+      const removed = new Set([rootID]);
+      let changed = true;
+      while (changed) {
+        changed = false;
+        for (const session of sessions) {
+          if (session.parentID && removed.has(session.parentID) && !removed.has(session.id)) {
+            removed.add(session.id);
+            changed = true;
+          }
+        }
+      }
+      sessions = sessions.filter((session) => !removed.has(session.id));
+      return new Response(null, { status: 204 });
+    }
+    if (url.pathname === "/api/event") {
+      eventGenerations += 1;
+      const frame =
+        options.eventFrame ??
+        `data: {"id":"evt_${eventGenerations}","type":"server.connected","data":{}}\n\n`;
+      const body = new ReadableStream<Uint8Array>({
+        start(controller) {
+          let cancelled = false;
+          controller.enqueue(new TextEncoder().encode(frame));
+          const cancel = () => {
+            if (cancelled) return;
+            cancelled = true;
+            cancelledStreams += 1;
+            controller.error(new Error("The fake event request was cancelled"));
+          };
+          if (init?.signal?.aborted) cancel();
+          else init?.signal?.addEventListener("abort", cancel, { once: true });
+        },
+      });
+      return new Response(body, { headers: { "content-type": "text/event-stream" } });
+    }
+
+    return json({ _tag: "NotFoundError", message: "Not found" }, 404);
+  };
+
+  return {
+    fetch,
+    get cancelledStreams() {
+      return cancelledStreams;
+    },
+    get eventGenerations() {
+      return eventGenerations;
+    },
+    requests,
+    get sessions() {
+      return [...sessions];
+    },
+  };
+}
+
+function resolvedLocation(options: FakeOpenCodeApiOptions, url: URL) {
+  const fallback = options.location ?? {
+    directory: "/workspace",
+    project: { canonical: "/workspace", directory: "/workspace", id: "project-test" },
+  };
+  const directory = url.searchParams.get("location[directory]") ?? fallback.directory;
+  const workspaceID = url.searchParams.get("location[workspace]") ?? fallback.workspaceID;
+  return { ...fallback, directory, ...(workspaceID ? { workspaceID } : {}) };
+}
+
+async function readJsonBody(body: BodyInit | null | undefined) {
+  if (typeof body !== "string" || !body) return undefined;
+  try {
+    return JSON.parse(body) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+function isModelRef(value: unknown): value is { id: string; providerID: string; variant?: string } {
+  return (
+    isRecord(value) &&
+    typeof value.id === "string" &&
+    typeof value.providerID === "string" &&
+    (value.variant === undefined || typeof value.variant === "string")
+  );
+}
+
+function messageCreated(value: unknown) {
+  if (!isRecord(value) || !isRecord(value.time) || typeof value.time.created !== "number") return 0;
+  return value.time.created;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function json(body: unknown, status = 200) {
+  const text = JSON.stringify(body);
+  return new Response(text, {
+    headers: {
+      "content-length": String(new TextEncoder().encode(text).byteLength),
+      "content-type": "application/json",
+    },
+    status,
+  });
+}

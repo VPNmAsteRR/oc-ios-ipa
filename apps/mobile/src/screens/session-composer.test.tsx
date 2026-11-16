@@ -1,0 +1,911 @@
+import { beforeEach, expect, jest, test } from "@jest/globals";
+import type {
+  AgentInfo,
+  CommandInfo,
+  FileSystemEntry,
+  ModelInfo,
+  ModelRef,
+  SkillInfo,
+} from "@opencode2-mobile/opencode-adapter";
+import { act, fireEvent, render, screen, within } from "@testing-library/react-native";
+import { type ComponentProps, useState } from "react";
+import { Keyboard, StyleSheet } from "react-native";
+
+import { palette, typography } from "../theme";
+import type { PromptDelivery } from "./prompt-admission-model";
+import { resetComposerPickerHold, SessionComposer } from "./session-composer";
+import type { ComposerMention, ComposerSubmitIntent } from "./session-composer-model";
+
+beforeEach(() => {
+  resetComposerPickerHold();
+});
+
+const agents = [
+  { hidden: false, id: "build", mode: "primary", name: "Build" },
+  { hidden: false, id: "explore", mode: "subagent", name: "Explore" },
+] as AgentInfo[];
+const models = [
+  {
+    enabled: true,
+    id: "model-1",
+    name: "Model One",
+    providerID: "provider",
+    status: "active",
+    variants: [{ id: "deep" }],
+  },
+] as ModelInfo[];
+const commands = [{ description: "Review changes", name: "review" }] as CommandInfo[];
+const skills = [
+  {
+    content: "Release instructions",
+    id: "release",
+    path: "/workspace/.opencode/skills/release.md",
+    name: "Release workflow",
+  },
+  {
+    content: "Automatic context",
+    id: "automatic",
+    path: "/workspace/.opencode/skills/automatic.md",
+    name: "Automatic",
+  },
+] as SkillInfo[];
+const files = [{ path: "src/index.ts", type: "file" }] as FileSystemEntry[];
+
+test("keeps the native prompt multiline and submits through an explicit control", () => {
+  const onSubmit = jest.fn();
+  render(<ComposerHarness onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  expect(input.props.multiline).toBe(true);
+  expect(input.props.submitBehavior).toBe("newline");
+  fireEvent(input, "focus");
+  // On iOS Fabric, numberOfLines is a maximum, not an initial editor height.
+  expect(input.props.numberOfLines).toBeUndefined();
+  fireEvent.changeText(input, "First line\nSecond line");
+  expect(input.props.value).toBe("First line\nSecond line");
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+});
+
+test("active composer switches Stop to send on text and back when cleared", () => {
+  const onInterrupt = jest.fn();
+  const onSubmit = jest.fn();
+  jest.useFakeTimers();
+  render(<ComposerHarness active onInterrupt={onInterrupt} onSubmit={onSubmit} />);
+  const editor = within(screen.getByLabelText("Prompt editor"));
+  expect(editor.getByRole("button", { name: "Stop" })).toHaveStyle({
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  });
+  fireEvent.press(editor.getByRole("button", { name: "Stop" }));
+  expect(onInterrupt).toHaveBeenCalledTimes(1);
+  expect(onSubmit).not.toHaveBeenCalled();
+  fireEvent.changeText(screen.getByLabelText("Prompt"), "Follow up");
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  expect(editor.getByRole("button", { name: "Steer" })).toHaveStyle({
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  });
+  fireEvent.press(editor.getByRole("button", { name: "Steer" }));
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  expect(onInterrupt).toHaveBeenCalledTimes(1);
+  fireEvent.changeText(screen.getByLabelText("Prompt"), " \n ");
+  act(() => jest.advanceTimersByTime(600));
+  expect(editor.getByRole("button", { name: "Stop" })).toBeEnabled();
+  jest.useRealTimers();
+});
+
+test("a quick second tap after sending cannot stop the session", () => {
+  jest.useFakeTimers();
+  try {
+    const onInterrupt = jest.fn();
+    render(<ComposerHarness active onInterrupt={onInterrupt} onSubmit={jest.fn()} clearOnSubmit />);
+    fireEvent.changeText(screen.getByLabelText("Prompt"), "Follow up");
+    fireEvent.press(screen.getByRole("button", { name: "Steer" }));
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    const send = screen.getByRole("button", { name: "Steer" });
+    expect(send).toBeDisabled();
+    fireEvent.press(send);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    act(() => jest.advanceTimersByTime(599));
+    expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+    act(() => jest.advanceTimersByTime(1));
+    fireEvent.press(screen.getByRole("button", { name: "Stop" }));
+    expect(onInterrupt).toHaveBeenCalledTimes(1);
+  } finally {
+    jest.useRealTimers();
+  }
+});
+
+test("idle composer never offers Stop", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Send" })).toHaveStyle({
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+  });
+  expect(screen.getByTestId("composer-submit-visual")).toHaveStyle({
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+  });
+});
+
+test("composer chips use footnote type without shrinking chat or touch targets", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  for (const label of ["Choose model", "Choose agent"]) {
+    expect(screen.getByText(label)).toHaveStyle(typography.footnote);
+    expect(screen.getByText(label).props.dynamicTypeRamp).toBe("footnote");
+  }
+  for (const prefix of ["Model", "Agent"])
+    expect(screen.getByRole("button", { name: new RegExp(`^${prefix}:`) })).toHaveStyle({
+      minHeight: 48,
+    });
+  expect(screen.getByLabelText("Prompt")).toHaveStyle({ fontSize: 17 });
+});
+
+test.each([false, true])("composer placeholder is Message while active %s", (active) => {
+  render(<ComposerHarness active={active} onSubmit={jest.fn()} />);
+  expect(screen.getByLabelText("Prompt").props.placeholder).toBe("Message");
+});
+
+test("brief Stop unavailability does not flash its color but disables the action immediately", () => {
+  jest.useFakeTimers();
+  const onSubmit = jest.fn();
+  const onInterrupt = jest.fn();
+  const view = render(<ComposerHarness active onSubmit={onSubmit} onInterrupt={onInterrupt} />);
+  try {
+    view.rerender(
+      <ComposerHarness active interruptDisabled onSubmit={onSubmit} onInterrupt={onInterrupt} />,
+    );
+    const button = screen.getByRole("button", { name: "Stop" });
+    expect(button).toBeDisabled();
+    expect(within(button).getByTestId("composer-submit-visual")).toHaveStyle({
+      backgroundColor: palette.signal,
+      width: 36,
+      height: 36,
+    });
+    fireEvent.press(button);
+    expect(onInterrupt).not.toHaveBeenCalled();
+    act(() => jest.advanceTimersByTime(500));
+    view.rerender(<ComposerHarness active onSubmit={onSubmit} onInterrupt={onInterrupt} />);
+    act(() => jest.advanceTimersByTime(1000));
+    expect(screen.getByRole("button", { name: "Stop" })).toBeEnabled();
+    expect(screen.getByTestId("composer-submit-visual")).toHaveStyle({
+      backgroundColor: palette.signal,
+    });
+    view.rerender(
+      <ComposerHarness active interruptDisabled onSubmit={onSubmit} onInterrupt={onInterrupt} />,
+    );
+    act(() => jest.advanceTimersByTime(1000));
+    expect(screen.getByTestId("composer-submit-visual")).toHaveStyle({
+      backgroundColor: palette.selected,
+    });
+  } finally {
+    view.unmount();
+    jest.useRealTimers();
+  }
+});
+
+test("the send icon keeps queue delivery for an active session", () => {
+  const onSubmit = jest.fn();
+  render(<ComposerHarness active delivery="queue" onSubmit={onSubmit} />);
+  expect(
+    screen.queryByTestId("composer-delivery-label", { includeHiddenElements: true }),
+  ).toBeNull();
+  fireEvent.changeText(screen.getByLabelText("Prompt"), "Next prompt");
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  // Sighted users see the same choice the screen reader hears.
+  expect(
+    screen.getByTestId("composer-delivery-label", { includeHiddenElements: true }),
+  ).toHaveTextContent("Queue");
+  fireEvent.press(screen.getByRole("button", { name: "Queue" }));
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+});
+
+test.each([false, true])("busy or unavailable Stop is disabled, stopping %s", (stopping) => {
+  const onInterrupt = jest.fn();
+  render(
+    <ComposerHarness
+      active
+      interruptDisabled
+      stopping={stopping}
+      onInterrupt={onInterrupt}
+      onSubmit={jest.fn()}
+    />,
+  );
+  const button = screen.getByRole("button", { name: stopping ? "Stopping" : "Stop" });
+  expect(button).toBeDisabled();
+  fireEvent.press(button);
+  expect(onInterrupt).not.toHaveBeenCalled();
+});
+
+test("typing while an interrupt is pending cannot submit a follow-up", () => {
+  const onSubmit = jest.fn();
+  render(<ComposerHarness active stopping onSubmit={onSubmit} />);
+  fireEvent.changeText(screen.getByLabelText("Prompt"), "Keep this draft");
+  expect(screen.getByRole("button", { name: "Steer" })).toBeDisabled();
+  fireEvent.press(screen.getByRole("button", { name: "Steer" }));
+  expect(onSubmit).not.toHaveBeenCalled();
+  expect(screen.getByLabelText("Prompt").props.value).toBe("Keep this draft");
+});
+
+test("dismisses the keyboard and collapses the composer after sending", () => {
+  const dismissKeyboard = jest.spyOn(Keyboard, "dismiss").mockImplementation(() => undefined);
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent.changeText(input, "Ship it");
+  fireEvent(input, "focus");
+  expect(screen.getByRole("button", { name: "Model: Choose model" })).toBeOnTheScreen();
+
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(dismissKeyboard).toHaveBeenCalledTimes(1);
+  expect(screen.getByLabelText("Prompt")).toHaveStyle({ height: 42 });
+  dismissKeyboard.mockRestore();
+});
+
+test("closes before publishing an immediate active-session transition", () => {
+  let composerClosed = false;
+  const dismissKeyboard = jest.spyOn(Keyboard, "dismiss").mockImplementation(() => {
+    composerClosed = true;
+  });
+  const onSubmit = jest.fn(() => {
+    expect(composerClosed).toBe(true);
+  });
+  render(<ComposerHarness onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent.changeText(input, "Ship it");
+  fireEvent(input, "focus");
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  expect(screen.getByLabelText("Prompt")).toHaveStyle({ height: 42 });
+  dismissKeyboard.mockRestore();
+});
+
+test("collapses to one pill and shows model, variant, and agent chips while expanded", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+
+  const input = screen.getByLabelText("Prompt");
+  expect(input).toHaveStyle({ height: 42 });
+  expect(screen.queryByRole("button", { name: /^Model:/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: /^Agent:/ })).toBeNull();
+  expect(screen.queryByRole("button", { name: "Composer options" })).toBeNull();
+
+  fireEvent(input, "focus");
+
+  expect(input).toHaveStyle({ minHeight: 58, maxHeight: 120 });
+  expect(screen.getByRole("button", { name: "Model: Choose model" })).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "Agent: Choose agent" })).toBeOnTheScreen();
+  // No model with variants is chosen, so the Variant chip stays out of the way.
+  expect(screen.queryByRole("button", { name: /^Variant:/ })).toBeNull();
+  expect(screen.getByLabelText("Prompt").props.value).toBe("");
+});
+
+test("lets native multiline layout grow without waiting for a size-change event", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+  // The native test environment uses 200% font scaling.
+  expect(input).toHaveStyle({ minHeight: 58, maxHeight: 120 });
+  expect(StyleSheet.flatten(input.props.style).height).toBeUndefined();
+  fireEvent.changeText(input, "First line\nSecond line\nThird line");
+  expect(input.props.value).toBe("First line\nSecond line\nThird line");
+  expect(StyleSheet.flatten(input.props.style).height).toBeUndefined();
+  // Native scrolling must remain available once the maximum height is reached,
+  // even if iOS does not emit another content-size event at that fixed limit.
+  expect(input.props.scrollEnabled).toBe(true);
+  fireEvent.changeText(input, "");
+  expect(input).toHaveStyle({ minHeight: 58, maxHeight: 120 });
+});
+
+test("keeps send in the focused composer toolbar", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+
+  expect(
+    within(screen.getByLabelText("Session composer")).getByRole("button", { name: "Send" }),
+  ).toBeOnTheScreen();
+});
+
+test("uses the selected default without showing queue or steer choices", () => {
+  const onSubmit = jest.fn();
+  render(<ComposerHarness active onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  expect(input).toHaveStyle(typography.chatBody);
+  fireEvent.changeText(input, "Follow-up");
+  fireEvent(input, "focus");
+  expect(screen.queryByRole("radio", { name: "Queue next" })).toBeNull();
+  expect(screen.queryByRole("radio", { name: "Steer now" })).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Steer" }));
+
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+});
+
+test("keeps the editor read-only until its encrypted draft has loaded", () => {
+  render(
+    <SessionComposer
+      active={false}
+      agents={agents}
+      commands={commands}
+      draft=""
+      editable={false}
+      largeText={false}
+      location={{ directory: "/workspace" }}
+      mentionAgents={agents}
+      mentionFiles={files}
+      mentions={[]}
+      models={models}
+      onAgentChange={jest.fn()}
+      onDraftChange={jest.fn()}
+      onModelChange={jest.fn()}
+      onMentionSearchChange={jest.fn()}
+      onSubmit={jest.fn()}
+      skills={skills}
+    />,
+  );
+
+  expect(screen.getByLabelText("Prompt").props.editable).toBe(false);
+});
+
+test("selects a server agent and model", () => {
+  const onAgentChange = jest.fn();
+  const onModelChange = jest.fn();
+  render(
+    <SessionComposer
+      active={false}
+      agents={agents}
+      commands={commands}
+      draft=""
+      largeText={false}
+      location={{ directory: "/workspace" }}
+      mentionAgents={agents}
+      mentionFiles={files}
+      mentions={[]}
+      models={models}
+      onAgentChange={onAgentChange}
+      onDraftChange={jest.fn()}
+      onModelChange={onModelChange}
+      onMentionSearchChange={jest.fn()}
+      onSubmit={jest.fn()}
+      skills={skills}
+    />,
+  );
+
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  expect(screen.getByLabelText("Agent results").props.inverted).toBeFalsy();
+  fireEvent.changeText(screen.getByLabelText("Search agents"), "build");
+  fireEvent.press(screen.getByRole("button", { name: "Build" }));
+  expect(onAgentChange).toHaveBeenCalledWith("build");
+
+  fireEvent.press(screen.getByRole("button", { name: "Model: Choose model" }));
+  expect(screen.getByLabelText("Model results").props.inverted).toBeFalsy();
+  fireEvent.press(screen.getByRole("button", { name: /Model One/ }));
+  expect(onModelChange).toHaveBeenCalledWith({
+    id: "model-1",
+    providerID: "provider",
+  });
+});
+
+test("selects a variant separately and can return to the model default", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  fireEvent.press(screen.getByRole("button", { name: "Model: Choose model" }));
+  fireEvent.press(screen.getByRole("button", { name: /Model One/ }));
+  fireEvent.press(screen.getByRole("button", { name: "Variant: Default" }));
+  // The variant chip also shows the text "Default", so match the option by its label.
+  const defaultOption = screen.getByLabelText("Default");
+  expect(defaultOption).toBeSelected();
+  expect(within(defaultOption).queryByText(/✓/)).toBeNull();
+  // Picker rows match the model picker: body text and a selected fill.
+  expect(within(defaultOption).getByText("Default")).toHaveStyle(typography.body);
+  expect(within(defaultOption).getByText("Default").props.dynamicTypeRamp).toBe("body");
+  expect(defaultOption).toHaveStyle({ backgroundColor: palette.selected });
+  fireEvent.press(screen.getByRole("button", { name: "deep" }));
+  expect(screen.getByRole("button", { name: "Variant: deep" })).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "Model: Model One" })).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "Variant: deep" }));
+  fireEvent.press(screen.getByRole("button", { name: "Default" }));
+  expect(screen.getByRole("button", { name: "Variant: Default" })).toBeOnTheScreen();
+});
+
+test("stays expanded after choosing an agent or variant until the prompt is tapped and blurs", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  // Opening a picker dismisses the keyboard, which blurs the prompt.
+  fireEvent(input, "blur");
+  fireEvent.press(screen.getByRole("button", { name: "Build" }));
+  expect(screen.getByRole("button", { name: "Agent: Build" })).toBeOnTheScreen();
+
+  fireEvent.press(screen.getByRole("button", { name: "Model: Choose model" }));
+  fireEvent.press(screen.getByRole("button", { name: /Model One/ }));
+  fireEvent.press(screen.getByRole("button", { name: "Variant: Default" }));
+  fireEvent.press(screen.getByRole("button", { name: "deep" }));
+  expect(screen.getByRole("button", { name: "Variant: deep" })).toBeOnTheScreen();
+  expect(screen.getByLabelText("Prompt")).toHaveStyle({ minHeight: 58, maxHeight: 120 });
+
+  // A closing sheet can move focus through the prompt on its own; that keeps the hold.
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  fireEvent(screen.getByLabelText("Prompt"), "blur");
+  expect(screen.getByRole("button", { name: "Agent: Build" })).toBeOnTheScreen();
+
+  fireEvent(screen.getByLabelText("Prompt"), "pressIn");
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  fireEvent(screen.getByLabelText("Prompt"), "blur");
+  expect(screen.queryByRole("button", { name: /^Agent:/ })).toBeNull();
+  expect(screen.getByLabelText("Prompt")).toHaveStyle({ height: 42 });
+});
+
+test("a composer remounted as a picker closes stays expanded, and only that once", () => {
+  const view = render(<ComposerHarness onSubmit={jest.fn()} />);
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  fireEvent(screen.getByLabelText("Prompt"), "blur");
+  fireEvent.press(screen.getByRole("button", { name: "Build" }));
+  view.unmount();
+  const remounted = render(<ComposerHarness onSubmit={jest.fn()} />);
+  expect(screen.getByRole("button", { name: /^Agent:/ })).toBeOnTheScreen();
+  remounted.unmount();
+  // A later composer, such as another session's, starts folded.
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  expect(screen.queryByRole("button", { name: /^Agent:/ })).toBeNull();
+});
+
+test("closing a picker without a choice keeps the composer expanded, and sending folds it", () => {
+  const dismissKeyboard = jest.spyOn(Keyboard, "dismiss").mockImplementation(() => undefined);
+  const onSubmit = jest.fn();
+  render(<ComposerHarness onSubmit={onSubmit} />);
+  const input = screen.getByLabelText("Prompt");
+  fireEvent.changeText(input, "Ship it");
+  fireEvent(input, "focus");
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  fireEvent(input, "blur");
+  fireEvent.press(screen.getByRole("button", { name: "Close Choose agent" }));
+  expect(screen.getByRole("button", { name: "Agent: Choose agent" })).toBeOnTheScreen();
+
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+  expect(onSubmit).toHaveBeenCalledTimes(1);
+  expect(screen.queryByRole("button", { name: /^Agent:/ })).toBeNull();
+  dismissKeyboard.mockRestore();
+});
+
+test("opening and closing a footer picker keeps the current draft", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+  fireEvent(screen.getByLabelText("Prompt"), "focus");
+  fireEvent.changeText(screen.getByLabelText("Prompt"), "Keep this prompt");
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  expect(screen.queryByRole("button", { name: "Close Composer options" })).toBeNull();
+  expect(screen.getByRole("button", { name: "Close Choose agent" })).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "Close Choose agent" }));
+  expect(screen.getByLabelText("Prompt").props.value).toBe("Keep this prompt");
+});
+
+test("completes and submits a command with multiline Unicode arguments", () => {
+  const onSubmit = jest.fn<(intent: ComposerSubmitIntent) => void>();
+  render(<ComposerHarness onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+  fireEvent.changeText(input, "/rev");
+  expect(screen.getByLabelText("Command suggestions")).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "/review, command" }));
+  expect(screen.getByLabelText("Prompt").props.value).toBe("/review ");
+  fireEvent.changeText(screen.getByLabelText("Prompt"), "/review src/æ.ts\nfocus errors");
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(onSubmit).toHaveBeenCalledWith({
+    arguments: "src/æ.ts\nfocus errors",
+    command: "review",
+    type: "command",
+  });
+});
+
+test("keeps slash search command-only", () => {
+  render(<ComposerHarness onSubmit={jest.fn()} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+  fireEvent.changeText(input, "/");
+
+  expect(screen.getByRole("button", { name: "/review, command" })).toBeOnTheScreen();
+  expect(screen.queryByRole("button", { name: /release/ })).not.toBeOnTheScreen();
+});
+
+test("does not submit a slash command with arguments before the catalog loads", () => {
+  const onSubmit = jest.fn();
+  render(<ComposerHarness completionLoading onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent.changeText(input, "/review src/index.ts");
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  expect(onSubmit).not.toHaveBeenCalled();
+});
+
+test("does not submit slash input when the command catalog is unavailable", () => {
+  const onSubmit = jest.fn();
+  render(<ComposerHarness completionUnavailable onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent.changeText(input, "/review src/index.ts");
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  expect(onSubmit).not.toHaveBeenCalled();
+});
+
+test("searches files, skills, and agents with at and submits a structured skill mention", () => {
+  const onSubmit = jest.fn<(intent: ComposerSubmitIntent) => void>();
+  render(<ComposerHarness onSubmit={onSubmit} />);
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+  fireEvent.changeText(input, "Ask @");
+  fireEvent(input, "selectionChange", {
+    nativeEvent: { selection: { end: 5, start: 5 } },
+  });
+
+  expect(screen.getByLabelText("File, skill, and agent suggestions")).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "@src/index.ts, file" })).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "@Explore, agent" })).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "@release, skill" })).toBeOnTheScreen();
+  fireEvent.press(screen.getByRole("button", { name: "@release, skill" }));
+  fireEvent.press(screen.getByRole("button", { name: "Send" }));
+
+  expect(onSubmit).toHaveBeenCalledWith({
+    skills: [{ id: "release", mention: { end: 12, start: 4, text: "@release" } }],
+    type: "prompt",
+  });
+});
+
+test.each([
+  [{ completionLoading: true }, "Loading commands"],
+  [{ completionUnavailable: true }, "Commands are unavailable"],
+  [{}, "No matching commands"],
+])("explains an empty command list with %p", (overrides, status) => {
+  render(<SessionComposer {...composerProps({ draft: "/zz", largeText: true, ...overrides })} />);
+  expect(within(screen.getByLabelText("Command suggestions")).getByText(status)).toBeOnTheScreen();
+});
+
+test.each([
+  [{ mentionLoading: true }, "Searching files, skills, and agents"],
+  [{ mentionUnavailable: true }, "Some mention results are unavailable"],
+  [{}, "No matching files, skills, or agents"],
+])("explains an empty mention list with %p", (overrides, status) => {
+  render(
+    <SessionComposer
+      {...composerProps({ draft: "Ask @zz", largeText: true, mentionFiles: [], ...overrides })}
+    />,
+  );
+  expect(
+    within(screen.getByLabelText("File, skill, and agent suggestions")).getByText(status),
+  ).toBeOnTheScreen();
+});
+
+test("keeps mention results visible while more are loading", () => {
+  render(
+    <SessionComposer
+      {...composerProps({ draft: "Ask @rel", largeText: true, mentionLoading: true })}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "@release, skill" })).toBeOnTheScreen();
+  expect(screen.getByText("Searching files, skills, and agents")).toBeOnTheScreen();
+});
+
+test("hides mention suggestions while the composer is collapsed", () => {
+  render(<SessionComposer {...composerProps({ draft: "Ask @rel" })} />);
+  expect(screen.queryByLabelText("File, skill, and agent suggestions")).toBeNull();
+  expect(screen.queryByLabelText("Command suggestions")).toBeNull();
+});
+
+test("publishes the mention query and clears it on unmount", () => {
+  const onMentionSearchChange = jest.fn();
+  const view = render(
+    <SessionComposer {...composerProps({ draft: "Ask @rel", onMentionSearchChange })} />,
+  );
+  expect(onMentionSearchChange).toHaveBeenLastCalledWith("rel");
+  view.rerender(<SessionComposer {...composerProps({ draft: "Ask", onMentionSearchChange })} />);
+  expect(onMentionSearchChange).toHaveBeenLastCalledWith(undefined);
+  onMentionSearchChange.mockClear();
+  view.unmount();
+  expect(onMentionSearchChange).toHaveBeenCalledWith(undefined);
+});
+
+test("announces composer errors", () => {
+  render(<SessionComposer {...composerProps({ error: "Prompt failed" })} />);
+  expect(screen.getByRole("alert")).toHaveTextContent("Prompt failed");
+});
+
+test("large text keeps the toolbar open and counts characters near the limit", () => {
+  render(<SessionComposer {...composerProps({ draft: "x".repeat(28_800), largeText: true })} />);
+  expect(screen.getByLabelText("Prompt")).toHaveStyle({ minHeight: 58, maxHeight: 120 });
+  expect(screen.getByText("28,800 / 32,000")).toBeOnTheScreen();
+});
+
+test("hides the character count well below the limit", () => {
+  render(<SessionComposer {...composerProps({ draft: "x".repeat(28_799), largeText: true })} />);
+  expect(screen.queryByText(/ \/ 32,000$/)).toBeNull();
+});
+
+test("labels selectors from references missing in the catalogs", () => {
+  render(
+    <SessionComposer
+      {...composerProps({
+        agent: "ghost",
+        largeText: true,
+        model: { id: "missing", providerID: "other", variant: "fast" },
+      })}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Model: other/missing" })).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "Variant: fast" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Agent: Ghost" })).toBeOnTheScreen();
+});
+
+test("labels selectors from catalog names", () => {
+  render(
+    <SessionComposer
+      {...composerProps({
+        agent: "build",
+        largeText: true,
+        model: { id: "model-1", providerID: "provider" },
+      })}
+    />,
+  );
+  expect(screen.getByRole("button", { name: "Model: Model One" })).toBeOnTheScreen();
+  expect(screen.getByRole("button", { name: "Variant: Default" })).toBeEnabled();
+  expect(screen.getByRole("button", { name: "Agent: Build" })).toBeOnTheScreen();
+});
+
+test("shows agent catalog loading, failure, and empty states", () => {
+  const retry = jest.fn();
+  const view = render(
+    <SessionComposer
+      {...composerProps({
+        agentCatalog: { error: false, loading: true, retry },
+        agents: [],
+        largeText: true,
+      })}
+    />,
+  );
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  expect(screen.getByText("Primary agents available at this session location")).toBeOnTheScreen();
+  expect(screen.getByText("Loading agents")).toBeOnTheScreen();
+
+  view.rerender(
+    <SessionComposer
+      {...composerProps({
+        agentCatalog: { error: true, loading: false, retry },
+        agents: [],
+        largeText: true,
+      })}
+    />,
+  );
+  expect(screen.getByText("Agents could not be loaded.")).toBeOnTheScreen();
+  expect(screen.queryByText("No primary agents available")).toBeNull();
+  fireEvent.press(screen.getByRole("button", { name: "Retry" }));
+  expect(retry).toHaveBeenCalledTimes(1);
+
+  view.rerender(<SessionComposer {...composerProps({ agents: [], largeText: true })} />);
+  expect(screen.getByText("No primary agents available")).toBeOnTheScreen();
+});
+
+test("searches agents by description and reports no matches", () => {
+  const onAgentChange = jest.fn();
+  const described = [
+    ...agents,
+    { description: "Writes docs", hidden: false, id: "docs", mode: "primary", name: "Scribe" },
+  ] as AgentInfo[];
+  render(
+    <SessionComposer
+      {...composerProps({ agent: "docs", agents: described, largeText: true, onAgentChange })}
+    />,
+  );
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Scribe" }));
+  fireEvent.changeText(screen.getByLabelText("Search agents"), "writes");
+  expect(screen.getByText("Writes docs")).toBeOnTheScreen();
+  expect(
+    within(screen.getByLabelText("Agent results")).getByRole("button", { name: "Scribe" }),
+  ).toBeSelected();
+  expect(screen.queryByRole("button", { name: "Build" })).toBeNull();
+  fireEvent.changeText(screen.getByLabelText("Search agents"), "nothing");
+  expect(screen.getByText("No matching agents")).toBeOnTheScreen();
+  fireEvent.changeText(screen.getByLabelText("Search agents"), "writes");
+  fireEvent.press(
+    within(screen.getByLabelText("Agent results")).getByRole("button", { name: "Scribe" }),
+  );
+  expect(onAgentChange).toHaveBeenCalledWith("docs");
+});
+
+test("reopening the agent picker clears the previous search", () => {
+  render(<SessionComposer {...composerProps({ largeText: true })} />);
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  fireEvent.changeText(screen.getByLabelText("Search agents"), "nothing");
+  fireEvent.press(screen.getByRole("button", { name: "Close Choose agent" }));
+  fireEvent.press(screen.getByRole("button", { name: "Agent: Choose agent" }));
+  expect(screen.getByLabelText("Search agents").props.value).toBe("");
+  expect(screen.getByRole("button", { name: "Build" })).toBeOnTheScreen();
+});
+
+test("names the selected model in the variant picker", () => {
+  const onModelChange = jest.fn();
+  render(
+    <SessionComposer
+      {...composerProps({
+        largeText: true,
+        model: { id: "model-1", providerID: "provider", variant: "deep" },
+        onModelChange,
+      })}
+    />,
+  );
+  fireEvent.press(screen.getByRole("button", { name: "Variant: deep" }));
+  // A few variants are a quick choice: a card above the toolbar, not a full-screen sheet.
+  expect(screen.getByLabelText("Choose variant")).toBeOnTheScreen();
+  expect(screen.getByRole("header", { name: "Variant · Model One" })).toBeOnTheScreen();
+  expect(screen.queryByRole("button", { name: "Close Choose variant" })).toBeNull();
+  expect(screen.getByLabelText("deep")).toBeSelected();
+  fireEvent.press(screen.getByRole("button", { name: "Default" }));
+  expect(onModelChange).toHaveBeenCalledWith({ id: "model-1", providerID: "provider" });
+});
+
+test.each([
+  [true, true, 1],
+  [true, false, 0],
+  [false, true, 0],
+])(
+  "focus on mount %s with editable %s requests %i focus frame",
+  (focusOnMount, editable, frames) => {
+    const requestFrame = jest
+      .spyOn(globalThis, "requestAnimationFrame")
+      .mockImplementation((callback) => {
+        callback(0);
+        return 7;
+      });
+    const cancelFrame = jest
+      .spyOn(globalThis, "cancelAnimationFrame")
+      .mockImplementation(() => undefined);
+    try {
+      const view = render(<SessionComposer {...composerProps({ editable, focusOnMount })} />);
+      expect(screen.getByLabelText("Prompt").props.autoFocus).toBe(focusOnMount);
+      expect(requestFrame).toHaveBeenCalledTimes(frames);
+      view.unmount();
+      expect(cancelFrame).toHaveBeenCalledTimes(frames);
+    } finally {
+      requestFrame.mockRestore();
+      cancelFrame.mockRestore();
+    }
+  },
+);
+
+test("moves the caret to the end of external drafts until the editor is focused", () => {
+  const view = render(<SessionComposer {...composerProps({ draft: "Hello" })} />);
+  expect(screen.getByLabelText("Prompt").props.selection).toEqual({ end: 5, start: 5 });
+  view.rerender(<SessionComposer {...composerProps({ draft: "Hello there" })} />);
+  expect(screen.getByLabelText("Prompt").props.selection).toEqual({ end: 11, start: 11 });
+
+  const input = screen.getByLabelText("Prompt");
+  fireEvent(input, "focus");
+  fireEvent(input, "selectionChange", { nativeEvent: { selection: { end: 5, start: 2 } } });
+  view.rerender(<SessionComposer {...composerProps({ draft: "Hello the" })} />);
+  expect(screen.getByLabelText("Prompt").props.selection).toEqual({ end: 5, start: 2 });
+  view.rerender(<SessionComposer {...composerProps({ draft: "Hel" })} />);
+  expect(screen.getByLabelText("Prompt").props.selection).toEqual({ end: 3, start: 3 });
+});
+
+test("explains why an active send is unavailable", () => {
+  const view = render(
+    <SessionComposer {...composerProps({ active: true, draft: "Next", onInterrupt: jest.fn() })} />,
+  );
+  expect(screen.getByRole("button", { name: "Send" })).toBeDisabled();
+  expect(screen.getByRole("button", { name: "Send" }).props.accessibilityHint).toBe(
+    "Choose steer or queue before sending.",
+  );
+  view.rerender(
+    <SessionComposer {...composerProps({ completionLoading: true, draft: "/review" })} />,
+  );
+  expect(screen.getByRole("button", { name: "Send" }).props.accessibilityHint).toBe(
+    "Wait for commands to load.",
+  );
+  expect(screen.queryByLabelText("Command suggestions")).toBeNull();
+});
+
+function composerProps(
+  overrides: Partial<ComponentProps<typeof SessionComposer>> = {},
+): ComponentProps<typeof SessionComposer> {
+  return {
+    active: false,
+    agents,
+    commands,
+    draft: "",
+    largeText: false,
+    location: { directory: "/workspace" },
+    mentionAgents: agents,
+    mentionFiles: files,
+    mentions: [],
+    models,
+    onAgentChange: jest.fn(),
+    onDraftChange: jest.fn(),
+    onModelChange: jest.fn(),
+    onMentionSearchChange: jest.fn(),
+    onSubmit: jest.fn(),
+    skills,
+    ...overrides,
+  };
+}
+
+function ComposerHarness({
+  active = false,
+  completionLoading = false,
+  completionUnavailable = false,
+  clearOnSubmit = false,
+  onSubmit,
+  onInterrupt = jest.fn(),
+  interruptDisabled = false,
+  stopping = false,
+  delivery = "steer",
+}: {
+  active?: boolean;
+  completionLoading?: boolean;
+  completionUnavailable?: boolean;
+  clearOnSubmit?: boolean;
+  onSubmit: (intent: ComposerSubmitIntent) => void;
+  onInterrupt?: () => void;
+  interruptDisabled?: boolean;
+  stopping?: boolean;
+  delivery?: PromptDelivery;
+}) {
+  const [draft, setDraft] = useState("");
+  const [agent, setAgent] = useState<string>();
+  const [model, setModel] = useState<ModelRef>();
+  const [mentions, setMentions] = useState<ComposerMention[]>([]);
+  return (
+    <SessionComposer
+      onInterrupt={onInterrupt}
+      interruptDisabled={interruptDisabled}
+      stopping={stopping}
+      active={active}
+      agent={agent}
+      agents={agents}
+      commands={commands}
+      completionLoading={completionLoading}
+      completionUnavailable={completionUnavailable}
+      delivery={delivery}
+      draft={draft}
+      largeText={false}
+      location={{ directory: "/workspace" }}
+      mentionAgents={agents}
+      mentionFiles={files}
+      mentions={mentions}
+      model={model}
+      models={models}
+      onAgentChange={setAgent}
+      onDraftChange={(content, nextMentions) => {
+        setDraft(content);
+        setMentions(nextMentions);
+      }}
+      onModelChange={setModel}
+      onMentionSearchChange={jest.fn()}
+      onSubmit={(intent) => {
+        if (clearOnSubmit) setDraft("");
+        onSubmit(intent);
+      }}
+      skills={skills}
+    />
+  );
+}

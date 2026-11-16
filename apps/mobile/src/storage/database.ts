@@ -1,0 +1,341 @@
+import type { SQLiteDatabase } from "expo-sqlite";
+
+export const mobileDatabaseName = "opencode-mobile.db";
+export const mobileDatabaseSchemaVersion = 18;
+
+const maxDraftCiphertextBytes = 256 * 1024 + 16;
+
+type Migration = {
+  sql: string;
+  transactional: boolean;
+  version: number;
+};
+
+export async function migrateMobileDatabase(db: SQLiteDatabase) {
+  await db.execAsync("PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;");
+  const current = await db.getFirstAsync<{ user_version: number }>("PRAGMA user_version");
+  const version = current?.user_version ?? 0;
+  if (version > mobileDatabaseSchemaVersion) throw new Error("DATABASE_VERSION_TOO_NEW");
+  if (version === mobileDatabaseSchemaVersion) return;
+
+  for (const migration of migrations) {
+    if (version < migration.version) await runMigration(db, migration);
+  }
+}
+
+async function runMigration(db: SQLiteDatabase, migration: Migration) {
+  if (!migration.transactional) {
+    await db.execAsync(migration.sql);
+    return;
+  }
+  try {
+    await db.execAsync(migration.sql);
+  } catch (caught) {
+    await db.execAsync("ROLLBACK;").catch(() => undefined);
+    throw caught;
+  }
+}
+
+const migrations: readonly Migration[] = [
+  {
+    sql: `
+    CREATE TABLE IF NOT EXISTS connection_profiles (
+      id TEXT PRIMARY KEY NOT NULL,
+      schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+      name TEXT NOT NULL,
+      base_url TEXT NOT NULL,
+      auth_mode TEXT NOT NULL CHECK (auth_mode IN ('basic', 'bearer', 'none')),
+      credential_ref TEXT UNIQUE,
+      allow_development_http INTEGER NOT NULL DEFAULT 0 CHECK (allow_development_http IN (0, 1)),
+      last_health_at_ms INTEGER,
+      last_health_pid INTEGER,
+      last_server_version TEXT,
+      last_used_at_ms INTEGER,
+      created_at_ms INTEGER NOT NULL,
+      updated_at_ms INTEGER NOT NULL,
+      CHECK (
+        (auth_mode = 'none' AND credential_ref IS NULL) OR
+        (auth_mode != 'none' AND credential_ref IS NOT NULL)
+      )
+    );
+    CREATE TABLE IF NOT EXISTS connection_selection (
+      singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+      selected_connection_id TEXT REFERENCES connection_profiles(id) ON DELETE SET NULL
+    );
+    CREATE TABLE IF NOT EXISTS pending_secure_store_writes (
+      credential_ref TEXT PRIMARY KEY NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS pending_secure_store_deletions (
+      credential_ref TEXT PRIMARY KEY NOT NULL
+    );
+    INSERT OR IGNORE INTO connection_selection(singleton, selected_connection_id) VALUES (1, NULL);
+    PRAGMA user_version = 1;
+  `,
+    transactional: false,
+    version: 1,
+  },
+  {
+    sql: `
+      CREATE TABLE IF NOT EXISTS app_preferences (
+        singleton INTEGER PRIMARY KEY NOT NULL CHECK (singleton = 1),
+        app_lock_enabled INTEGER NOT NULL DEFAULT 0 CHECK (app_lock_enabled IN (0, 1))
+      );
+      INSERT OR IGNORE INTO app_preferences(singleton, app_lock_enabled) VALUES (1, 0);
+      PRAGMA user_version = 2;
+    `,
+    transactional: false,
+    version: 2,
+  },
+  {
+    sql: `
+      CREATE TABLE IF NOT EXISTS session_drafts (
+        connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL,
+        schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+        nonce BLOB NOT NULL CHECK (typeof(nonce) = 'blob' AND length(nonce) = 24),
+        ciphertext BLOB NOT NULL CHECK (
+          typeof(ciphertext) = 'blob' AND
+          length(ciphertext) BETWEEN 16 AND ${maxDraftCiphertextBytes}
+        ),
+        updated_at_ms INTEGER NOT NULL,
+        PRIMARY KEY (connection_id, session_id)
+      );
+      CREATE TABLE IF NOT EXISTS pending_draft_key_deletions (
+        connection_id TEXT PRIMARY KEY NOT NULL
+      );
+      PRAGMA user_version = 3;
+    `,
+    transactional: false,
+    version: 3,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        ALTER TABLE session_drafts
+        ADD COLUMN revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0);
+        CREATE TABLE IF NOT EXISTS unresolved_prompt_admissions (
+          connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL,
+          admission_id TEXT NOT NULL CHECK (admission_id GLOB 'msg_*'),
+          schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+          status TEXT NOT NULL CHECK (status IN ('submitting', 'unknown-delivery')),
+          delivery TEXT CHECK (delivery IN ('steer', 'queue')),
+          draft_revision INTEGER NOT NULL CHECK (draft_revision >= 0),
+          submitted_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (connection_id, session_id, admission_id)
+        );
+        PRAGMA user_version = 4;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 4,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS followed_project_preferences (
+          connection_id TEXT PRIMARY KEY NOT NULL
+            REFERENCES connection_profiles(id) ON DELETE CASCADE
+        );
+        CREATE TABLE IF NOT EXISTS followed_projects (
+          connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          project_id TEXT NOT NULL CHECK (length(project_id) > 0),
+          position INTEGER NOT NULL CHECK (position >= 0),
+          PRIMARY KEY (connection_id, project_id),
+          UNIQUE (connection_id, position)
+        );
+        PRAGMA user_version = 5;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 5,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS notification_pairings (
+          connection_id TEXT PRIMARY KEY NOT NULL
+            REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          binding_id TEXT UNIQUE NOT NULL,
+          broker_id TEXT NOT NULL,
+          broker_origin TEXT NOT NULL,
+          secret_ref TEXT UNIQUE NOT NULL,
+          created_at_ms INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pending_notification_secret_writes (
+          secret_ref TEXT PRIMARY KEY NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS pending_notification_secret_deletions (
+          secret_ref TEXT PRIMARY KEY NOT NULL
+        );
+        PRAGMA user_version = 6;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 6,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS handled_notification_events (
+          binding_id TEXT NOT NULL
+            REFERENCES notification_pairings(binding_id) ON DELETE CASCADE,
+          event_id TEXT NOT NULL,
+          handled_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (binding_id, event_id)
+        );
+        PRAGMA user_version = 7;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 7,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE IF NOT EXISTS pending_notification_revocations (
+          binding_id TEXT PRIMARY KEY NOT NULL,
+          broker_origin TEXT NOT NULL,
+          secret_ref TEXT UNIQUE NOT NULL,
+          created_at_ms INTEGER NOT NULL
+        );
+        PRAGMA user_version = 8;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 8,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        ALTER TABLE session_drafts
+        ADD COLUMN payload_version INTEGER NOT NULL DEFAULT 1
+          CHECK (payload_version IN (1, 2));
+        PRAGMA user_version = 9;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 9,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        ALTER TABLE unresolved_prompt_admissions
+        ADD COLUMN submission_kind TEXT NOT NULL DEFAULT 'prompt'
+          CHECK (submission_kind IN ('command', 'prompt'));
+        PRAGMA user_version = 10;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 10,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE transcript_preferences (
+          singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+          detailed INTEGER NOT NULL DEFAULT 0 CHECK (detailed IN (0, 1)),
+          reasoning INTEGER NOT NULL DEFAULT 0 CHECK (reasoning IN (0, 1))
+        );
+        INSERT INTO transcript_preferences(singleton) VALUES (1);
+        PRAGMA user_version = 11;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 11,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE model_favorites (
+          connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          provider_id TEXT NOT NULL CHECK (length(provider_id) > 0),
+          model_id TEXT NOT NULL CHECK (length(model_id) > 0),
+          position INTEGER NOT NULL CHECK (position >= 0),
+          PRIMARY KEY (connection_id, provider_id, model_id)
+        );
+        PRAGMA user_version = 12;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 12,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        ALTER TABLE transcript_preferences
+        ADD COLUMN default_delivery TEXT NOT NULL DEFAULT 'steer'
+        CHECK (default_delivery IN ('steer', 'queue'));
+        PRAGMA user_version = 13;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 13,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE session_archives (
+          connection_id TEXT NOT NULL REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+          PRIMARY KEY (connection_id, session_id)
+        );
+        PRAGMA user_version = 14;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 14,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        ALTER TABLE session_archives
+        ADD COLUMN restored_at_ms INTEGER CHECK (restored_at_ms IS NULL OR restored_at_ms >= 0);
+        PRAGMA user_version = 15;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 15,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE pull_request_filters (
+          connection_id TEXT PRIMARY KEY REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          status TEXT NOT NULL DEFAULT 'all' CHECK (
+            status IN ('all', 'ready', 'draft', 'review-required', 'approved', 'changes-requested')
+          ),
+          project_id TEXT CHECK (project_id IS NULL OR length(project_id) > 0)
+        );
+        PRAGMA user_version = 16;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 16,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        CREATE TABLE session_inbox_preferences (
+          connection_id TEXT PRIMARY KEY REFERENCES connection_profiles(id) ON DELETE CASCADE,
+          since_ms INTEGER NOT NULL CHECK (since_ms >= 0),
+          working_expanded INTEGER NOT NULL DEFAULT 1 CHECK (working_expanded IN (0, 1))
+        );
+        PRAGMA user_version = 17;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 17,
+  },
+  {
+    sql: `
+        BEGIN IMMEDIATE;
+        ALTER TABLE session_inbox_preferences
+          ADD COLUMN archived_expanded INTEGER NOT NULL DEFAULT 1 CHECK (archived_expanded IN (0, 1));
+        PRAGMA user_version = 18;
+        COMMIT;
+      `,
+    transactional: true,
+    version: 18,
+  },
+];

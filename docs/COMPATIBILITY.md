@@ -1,0 +1,1300 @@
+# Compatibility results
+
+This report records redacted physical-device and emulator probes. It contains no
+server addresses, credentials, session titles, prompts, paths, or file content.
+
+## Current verified baseline
+
+As of 2026-08-25, signed test builds passed real-server text turns, transcript
+paging, notification delivery, permission and form handling, and network
+recovery on physical iOS and Android devices. The signed iOS build also passed
+the fail-closed database backup-exclusion startup guard. Statements marked
+pending in older dated entries describe the status at the time of that probe;
+later entries supersede them.
+
+## 2026-11-14: floating background-work chip and card, pending device verification
+
+iPhone screenshots showed the background-work chip in an opaque band above the
+composer, the composer folding after an agent choice, and model changes behind
+a disclosure. The chip now floats over the transcript: only the rest of the dock
+reserves space, measured in one piece, and the inverted list pads its newest
+end by the chip's height. Touches beside the chip reach the transcript.
+
+The chip spins while a subagent runs, shows a still terminal glyph when only
+shells run, and keeps the warm dot when something needs the user. Tapping it
+opens a card over the chip instead of a sheet: the screen dims, tapping outside
+closes it, and a shell's page opens inside the card. The card is measured from
+the chip again on rotation, resize, keyboard changes and once shown. It stays
+within the safe area and below the status bar.
+
+After an agent, model or variant choice, the composer stays expanded until the
+prompt is tapped and blurs, or the prompt is sent. Model changes read inline as
+"Model changed to" the model and variant.
+
+The full lint, typecheck, test, and build sequence passed, including 1575
+mobile tests and both Hermes exports. Expo Doctor passed 18 of 18 checks. Every
+changed file is JavaScript. Revisions were published to preview through local
+EAS Update; on an iPhone the chip floated over the transcript. Still unverified
+on devices: the final revision; whether the composer stays expanded after an
+agent choice; Android `measureInWindow` alignment with the status-bar-translucent
+card; the card with the keyboard open, in landscape and with large text; and
+VoiceOver and TalkBack focus when the card opens and closes.
+
+## 2026-11-14: background shells in the composer chip, pending device verification
+
+The chip above the composer now counts running background shells next to
+subagents, as on desktop ("1 shell", "1 subagent · 2 shells"). Shells come from
+transcript shell calls that started in, or moved to, the background. The
+server's shell status decides whether each one still runs. Foreground shells
+stay in the transcript. The sheet lists Needs you, Subagents and Shells. A shell
+opens a page in the sheet with its command, run time, the last 40 lines of
+output and a confirmed Stop. Stop removes the shell on the server. After the
+shell ends, the page says how it ended. Android back returns from the page to
+the list. An iOS swipe closes the sheet.
+
+To match the OpenCode iOS app, a collapsed tool group now reads "Used N tools",
+with no status label and no chevron. Background subagent launches fold into that
+group, and the chip announces their changes. Only the Working line and the chip
+animate; other running glyphs stay still. Expanded shell rows set the command in
+monospace.
+
+The full lint, typecheck, test, and build sequence passed, including 1566 mobile
+tests and both Hermes exports. Expo Doctor passed 18 of 18 checks. Every changed
+file is JavaScript; none is a native fingerprint source under the preview EAS
+environment. Earlier revisions were published to preview through local EAS
+Update. On an iPhone, the chip showed a running background shell and "Used N
+tools" groups. Still unverified on devices: VoiceOver and TalkBack focus on
+opening a shell, Back and Stop; TalkBack speaking dock announcements on Android
+16; the final revision's appearance; Android; and large text. Running shells
+launched before the loaded transcript pages are not found until those pages
+load.
+
+## 2026-11-14: Working docked above the bottom menu
+
+An iPhone screenshot showed the Working section below a long Recent list, out of
+view until the user scrolled to the end. Working now sits in a dock between the
+session list and the bottom menu. Expanded rows scroll inside the dock past 40%
+of the window height, and search hides the dock.
+
+The full lint, typecheck, test, and build sequence passed, including 1534 mobile
+tests and both Hermes exports. Expo Doctor passed 18 of 18 checks. Both native
+fingerprints and runtime matched the installed 0.1.6 baseline under the preview
+EAS environment, and local EAS Update publication succeeded for iOS and Android
+on preview. The user confirmed the dock looks right on iPhone. Android appearance,
+large text, and VoiceOver/TalkBack focus order remain unverified.
+
+A follow-up iPhone screenshot showed the docked working row at 70% opacity with a
+dim title, so it read as archived. Working rows no longer fade, and their title
+uses full-strength ink at the regular weight. Archived rows keep the 50% fade.
+The follow-up was published the same way to preview; its device appearance is
+pending.
+
+## 2026-11-14: event stream stays open in the iOS app switcher, pending device verification
+
+On an iPhone, swiping up to the app switcher showed "Request status is stale"
+and "Showing saved data until the server reconnects" on the workspace card. iOS
+reports `inactive` while the app switcher, Control Center, Notification Center,
+or a system prompt covers the app. The transport treated every state other than
+`active` as background, so it closed the event stream and marked the connection
+stale. Only `background` now closes the stream and pauses query focus; `inactive`
+keeps both. Leaving for another app still reaches `background`, closes the
+stream, and reconnects on return. Android does not report `inactive`.
+
+The full lint, typecheck, test, and build sequence passed, including 1533 mobile
+tests and both Hermes exports. Expo Doctor passed 18 of 18 checks. Both native
+fingerprints and runtime matched the installed 0.1.6 baseline under the preview
+EAS environment. Local EAS Update publication then succeeded for iOS and Android
+on preview. Publication does not establish installation or device behavior.
+Still to verify on the iPhone: no notice while hovering in the app switcher, and
+a clean reconnect after switching to another app and back.
+
+## 2026-11-10: transcript image tiles and swipeable viewer, pending device verification
+
+Transcript images now form justified rows of tiles that keep each image's shape.
+Rows aim for 170 points and stop at 200, so a lone portrait screenshot stays a
+small tile. Tapping a tile opens the full-screen viewer, which now pages
+horizontally between the group's images and shows a position counter. iOS keeps
+a zooming scroll view inside each page. Android locks paging while an image is
+zoomed, and its pan gesture activates only when zoomed so an unzoomed swipe
+reaches the pager. Hermes behavior of a pinch that starts with sideways motion
+on Android, and of nested zoom inside the pager on iOS, still needs checking on a
+device.
+
+The full lint, typecheck, test, and build sequence passed, including 1532 mobile
+tests and both Hermes exports. Both native fingerprints and runtime matched the
+installed 0.1.6 baseline under the preview EAS environment. Local EAS Update
+publication then succeeded for iOS and Android on preview. Publication does not
+establish installation or device behavior.
+
+## 2026-11-01: code block syntax highlighting, pending device verification
+
+Fenced code blocks are now colored like the OpenCode iOS app. Keywords and
+function names are pink, types lavender, numbers and booleans cyan, and
+punctuation dim. Strings and comments, absent from the reference screenshot, use
+green and italic grey. `prism-react-renderer` 2.4.1, plain JavaScript with no
+native code, tokenizes TypeScript, TSX, JavaScript, JSON, YAML, Python, Rust, Go,
+Swift, Kotlin, SQL, Markdown, C, C++, CSS, and markup. Shell, diff, and other
+languages stay plain. Tokens render as nested spans inside one selectable `Text`,
+so selection and Copy code are unchanged. Blocks over 20,000 characters stay
+plain because streaming re-tokenizes each update. Tests cover token colors,
+lossless tokenizing including empty lines, fence aliases, the size limit, and
+selection. Hermes runtime behavior still needs checking on a device.
+
+## 2026-11-01: row layout transitions replace the live-edge glide, pending device verification
+
+An iPhone recording showed the transcript flickering as each line streamed in.
+Frame-by-frame motion showed the same pair roughly every 150 ms: the
+transcript rose a full line (about 22 points) for one frame, dropped back about
+20 points the next, then glided up. The glide depended on
+`maintainVisibleContentPosition` anchoring the row above the newest one. iOS
+applied that compensation one frame after drawing the new layout, so each line
+showed uncompensated for a frame. Tuning the glide cannot remove a frame drawn
+before it runs.
+
+The transcript is anchored on the newest row again (`minIndexForVisible: 0`),
+so streaming growth needs no scroll compensation. While following with Reduce
+Motion off, Reanimated's `Animated.FlatList` applies a `LinearTransition` to
+each row. That spring is critically damped at the earlier glide rate (mass 1,
+stiffness 289, damping 34). Rows animate from their previous frame to the new
+one in the commit that changes them: older text slides up, and the growing row
+eases to its new height while its new line rises in from the bottom edge.
+Reading older text, or Reduce Motion, removes the transition. The UI-thread
+glide, its JavaScript fallback, and the `live_edge_fallbacks` counter are
+removed. Rendered tests cover the anchor, the transition while following, its
+removal when reading or under Reduce Motion, and instant live-edge corrections.
+Motion quality, the appearance of newly inserted rows, and Android still need
+checking on devices.
+
+## 2026-11-01: background stale banner, pending device verification
+
+A 4-frames-per-second review of an app-switching recording found streamed text
+in order around each reply start and return. It also found the session header's
+"STALE. Check connection settings." banner flashing on every switch. The
+transport reports `stale` only while the app is in the background, and it
+reconnects in about 0.15 seconds on return, so the banner no longer shows for
+that status. Reconnecting, offline, unauthorized, incompatible, and idle states
+still show it. The same recording showed the OpenCode iOS app resuming with a
+paragraph cut mid-word.
+
+## 2026-11-01: streamed text lost across transcript refetches, pending device verification
+
+Two iPhone recordings showed a table and the following paragraphs rendered inside
+a code block while a reply streamed after the app returned to the foreground.
+They were correct once the reply finished. Text deltas carry no offset, so the
+bridge appended them to whatever text was cached. A transcript refetch in flight
+then replaced that text with the server's copy from when the request was served,
+which dropped any deltas applied in between. A gap that swallowed a closing code
+fence pushed the rest of the reply into the code block until `text.ended`
+restored the authoritative text. The same race applies to the refetches after
+`session.step.streamed` during normal streaming.
+
+While a transcript query is fetching, the bridge now holds its transcript
+events, including during the first fetch, which previously dropped them. When the
+fetch settles, held text and reasoning deltas that the refetched text already
+ends with are dropped, matching only on whole-delta boundaries, and the rest are
+applied. A failed fetch applies the held events as before. Reducer and bridge
+tests cover full, partial, and no overlap, whole-delta matching, and a missed
+closing fence.
+
+A follow-up recording and transport report showed that this was not enough. On
+return, the transcript still ended where it had when the app left, and new
+deltas were appended to it, skipping the text streamed meanwhile. The message
+list returns projected messages built from durable events, and text deltas are
+not durable, so a refetch of an in-progress part cannot supply the missing text.
+The report also showed about ten `durable_gap` reconnects within ten seconds in
+the foreground. Each new stream missed events sent while it connected, then
+compared the next durable sequence with the previous stream's and reconnected
+again.
+
+Each event stream generation now starts its own durable sequence tracking; its
+snapshot covers anything sent between streams. Gaps within one stream are still
+detected. Text and reasoning deltas only extend a part whose start this stream
+delivered, or one that a refetch proves continuous by ending exactly where held
+deltas begin. Other deltas are dropped and the transcript is refetched once, and
+the part keeps its last known text until its authoritative `ended` text arrives.
+After returning mid-reply, text can therefore pause, but no longer shows holes.
+Coordinator and bridge tests cover the reconnect chain, the dropped deltas, the
+single refetch, and restored continuity.
+
+## 2026-11-01: live-edge glide for streamed text, pending device verification
+
+The transcript anchors `maintainVisibleContentPosition` on the row above the
+newest one, so growth of the newest row and newly inserted rows land just below
+the visible edge. A first version returned to the edge with the native
+`autoscrollToTopThreshold`. An iPhone screen recording showed each new line
+starting a fresh ease-in-out scroll from rest, with a scroll moving at about 24
+points per frame stopping within one frame when the next line arrived.
+
+A first Reanimated frame callback could not be confirmed on device, and a
+JavaScript-driven spring replaced it. A later side-by-side recording measured
+the difference from OpenCode. OpenCode moves at a near-constant 2.7 points per
+frame during steady streaming and ramps smoothly to about 9 points per frame for
+large blocks. The JavaScript spring jumped 6 to 7 points on the first frame of
+each line, because the JavaScript thread skipped frames while re-rendering the
+streaming message.
+
+The spring (rate 17: one 22-point line peaks near 140 points per second and
+settles in about 0.33 seconds) now steps on the UI thread through a Reanimated
+frame callback with `scrollTo`. JavaScript only adds the distance the list
+compensated for, keeping the current velocity. If the glide shows no progress
+within 500 ms, JavaScript scrolls to the live edge and counts it as
+`live_edge_fallbacks` in the transcript diagnostics, so a device report shows
+whether the UI-thread path works. Dragging stops the glide, Scroll to latest
+cancels it, and Reduce Motion keeps corrections instant. Unit and rendered tests
+cover the spring, compensation hand-off, fallback, and counter.
+
+That recording also showed the app returning to the foreground mid-stream and
+not showing the missed reply until the session was reopened. A redacted
+transport report from a later foreground test showed each return reconnecting
+in about 0.15 seconds with a snapshot installed every time. Durable-gap
+reconnects resynchronized events missed in the background, and the full reply
+appeared on return without reopening the session. The earlier symptom matches
+the Reanimated glide leaving compensated rows below the visible edge.
+
+The same recording showed a fenced code block rendering as an empty box during
+and after streaming. Code blocks were the only use of the native selection
+view's unwrapped mode, which sizes its width from a native measurement event.
+Code blocks now use React Native's selectable `Text` inside the horizontal
+scroll view, with Copy code unchanged. The native root cause is unconfirmed, and
+the fix needs checking on a device.
+
+## 2026-11-01: transcript images, streaming motion, and compact composer, pending device verification
+
+Tool image results and image attachments render inline from bounded `data:`
+URIs, with no network requests. Chat
+text is 17/25, and tool summaries use the same size. The collapsed composer is a
+single pill and shows model, variant, and agent chips once it expands for input.
+The working status is the last transcript row, the subagent pill floats above
+the composer, and one dot spinner marks working state across the app.
+
+The full lint, typecheck, test, and build sequence passed, including 544 mobile
+tests and both Hermes exports. Expo Doctor passed all 18 checks. The public-tree
+check and secret scan passed. Both native fingerprints and runtime matched the
+installed baseline under the preview EAS environment, and local EAS Update
+publication succeeded for iOS and Android on preview, runtime 0.1.5. Image
+decoding, nested option sheets, and the server's inline image format still need
+checking on a physical device.
+
+That update also eased height changes of the newest transcript rows with a
+Reanimated height animation. On iPhone, streamed assistant text then stayed
+hidden until the session was refreshed. The animation was removed; streamed rows
+again appear through the existing live-edge scroll.
+
+## 2026-11-01: session list flicker during reconciliation, pending device verification
+
+An iPhone screen recording showed the Sessions inbox briefly replaced by the
+loading indicator, then shown with recent sessions only, before working sessions
+and child rows returned in a different order. Each stream snapshot starts a new
+reconciliation revision, and the followed-session and ancestry queries are keyed
+by that revision, so each snapshot restarted them without data.
+
+These queries now keep the previous snapshot as placeholder data within the same
+connection and key scope while the new revision loads. Placeholder data still
+counts as reconciling for attention coverage, retirement probes, and event
+location resolution. A regression test that holds the refetch open failed before
+the change and passed after it.
+
+The full lint, typecheck, test, and build sequence passed, including 537 mobile
+tests and both Hermes exports. Expo Doctor passed all 18 checks. Both native
+fingerprints and runtime matched the installed baseline under the preview EAS
+environment, and local EAS Update publication succeeded for iOS and Android on
+preview, runtime 0.1.5. Physical-device verification remains pending.
+
+## 2026-11-10: removed sibling worktree, pending device verification
+
+An iPhone screenshot showed a permanent unavailable-location warning for an
+external worktree that only archived sessions referenced. Read-only checks
+against the local server found the directory absent. Interaction lookups at that
+location returned `LocationNotFoundError` (404). A root session list without the
+`archived` parameter included archived roots.
+
+### Root entry in a parent listing
+
+The first published fix below did not clear the warning on the device. The
+worktree was a sibling of its project root, so the removed-directory check lists
+the shared parent through the live root. The server listed every sibling as
+`../name/`, but listed the project root itself as `./`. One level higher, it
+listed the root's parent as `../` among `../../name/` entries. The check rejected
+the whole listing as malformed. A rejected listing never proves absence, so the
+location stayed unavailable. The 2026-10-25 fix covered worktrees whose parent
+does not contain the project root.
+
+The check now ignores only the single entry that leads back to the root when the
+listed parent is an ancestor of the root. Any other unexpected entry still
+rejects the listing. Adapter regression tests for a sibling and a higher ancestor
+failed before the change and passed after it. Run against the local server, the
+fixed check reported the removed sibling absent and a present sibling present.
+The full check sequence passed, including 371 adapter and 1528 mobile tests.
+Both native fingerprints and runtime matched the installed 0.1.6 baseline, and
+local EAS Update publication to preview succeeded for iOS and Android.
+Physical-device verification remains pending.
+
+### Selected location
+
+Opening a session sets the selected location, and it stays set after the user
+leaves the session. The selected location was exempt from the removed-directory
+check, so one visit kept the warning until the app restarted. Selection no
+longer blocks that check, and a failed lookup of a selected location that the
+check proved removed no longer marks coverage incomplete. Active locations,
+notification attention, and cached pending requests keep their protections.
+
+A regression test failed before the change and passed after it. The full lint,
+typecheck, test, and build sequence passed, including 1528 mobile tests and both
+Hermes exports. Physical-device verification remains pending.
+
+Both native fingerprints and runtime matched the installed baseline under the
+preview EAS environment. Local EAS Update publication then succeeded for iOS and
+Android on preview, runtime 0.1.6. Publication does not establish installation
+or device behavior.
+
+## 2026-10-25: removed external worktrees, pending device verification
+
+An iPhone screenshot showed failed permission and form checks for historical
+worktrees outside their project roots. Read-only local filesystem checks found
+the three referenced directories absent. A local server API probe confirmed
+that listing an external parent through a live location succeeds, retains the
+request location, and returns project-relative entry paths. This agrees with the
+published V2 filesystem contract. No missing location was initialized.
+
+The existing retirement check only considered descendants of the project root.
+It now also probes external historical worktrees through the live project root.
+This covered parents that do not contain the project root; see 2026-11-10 for
+sibling worktrees.
+Only a successful, validated listing can establish absence. Active locations,
+selected locations, notification attention, and cached pending requests retain
+their existing protections. Session history remains visible, and refresh checks
+for restoration. Failed probes do not establish deletion.
+
+Regression tests reproduce the incomplete-coverage warning for external
+worktrees before the fix and verify retirement and restoration after it.
+The full lint, typecheck, test, and build sequence passed, including 536 mobile
+tests, 101 adapter tests, and both iOS and Android Hermes exports. Expo Doctor
+passed all 18 checks. Physical-device verification of the fix remains pending.
+
+On 2026-10-26, both native fingerprints and runtime matched the installed signed
+build baseline under the preview EAS environment before local OTA publication.
+Local EAS Update publication then succeeded for iOS and Android on preview,
+runtime 0.1.5. Publication does not establish installation or device behavior.
+
+## 2026-10-01: location-wide MCP runtime controls, pending device verification
+
+### Switch contrast follow-up
+
+A user-supplied iPhone screenshot showed that on-state MCP switches rendered as
+solid white pills. Their white track matched the native white thumb. The MCP
+switches now use the shared native switch colors, with a medium-gray on-track,
+dark off-track, and explicitly colored light thumb. A regression test against
+the rendered iOS switch props failed with the white on-track and passed after
+the shared styling was applied.
+
+The fix passed the full checks, 440 mobile tests, both Hermes exports, and all 18
+Expo Doctor checks. The contrast fix was published locally through EAS Update to
+preview for both platforms, runtime 0.1.5, after both native fingerprints matched
+the installed baseline under the preview environment. Corrected physical-device
+appearance remains pending. The screenshot confirms the earlier switch UI loaded on iPhone,
+but does not establish MCP mutation behavior or Android appearance.
+
+### Initial implementation and publication
+
+The session context bar retains the current branch and adds Location options.
+The sheet lists MCP status and offers runtime Connect/Disconnect actions for the
+exact session location. These actions are not session-only switches and do not
+write persistent configuration. The generated experimental operations are an
+explicitly accepted exception for this feature, checked against client 2.0.21
+and the published V2 OpenAPI contract.
+
+Deterministic tests cover location isolation, encoded server names, malformed
+snapshots, authentication failures, cancellation, refreshed status, disconnected
+controls, duplicate taps across sheet reopening, and uncertain mutation outcomes.
+No raw server error text is displayed. The full lint, typecheck, test, and build
+sequence passed, including 91 adapter tests, 437 mobile tests, and iOS/Android
+Hermes exports. Expo Doctor passed all 18 checks.
+
+Real-server MCP behavior and physical iOS/Android verification remain pending.
+Verify shared-location effects, restart behavior, keyboard dismissal, narrow
+screens, large text, and VoiceOver/TalkBack focus before claiming device support.
+
+The preview deployment's iOS and Android native fingerprints and runtime matched
+the installed 0.1.5 baseline under the EAS preview environment. A local EAS Update
+publication succeeded for both platforms on preview. Device installation and MCP
+verification remain pending; publication alone does not establish either.
+
+A follow-up replaces the Connect/Disconnect buttons with native on/off switches.
+Enabled state is separate from connection status: pending, authentication-required,
+and failed servers remain on, while disabled servers are off. Authentication-required
+servers can be switched off. Pending user changes update the switch immediately,
+disable repeat actions, then reconcile or roll back to the server snapshot. Failed
+connections retain a separate retry action. This switch revision has not yet been
+verified on physical devices.
+
+The switch revision passed the full lint, typecheck, test, and build sequence,
+including 439 mobile tests and both Hermes exports. Expo Doctor passed all 18
+checks. Regression coverage includes switching off authentication-required servers
+and keeping failed connections on with a separate failure status.
+
+The switch revision was subsequently published locally through EAS Update to
+preview for iOS and Android, runtime 0.1.5, after both native fingerprints matched
+the installed baseline under the EAS preview environment. Device installation
+and switch behavior remain unverified.
+
+## 2026-09-28: transcript range selection, pending native verification
+
+The user reported that long-pressing transcript text on iOS offered Copy without
+selection handles. The installed React Native iOS paragraph implementation exposes
+a whole-text copy menu rather than range selection.
+
+An Apple-only local Expo view now uses a non-editable, selectable `UITextView` for
+transcript text, preserving attributed formatting and routing link taps through
+the existing confirmation callback. Android continues to use selectable native
+React Native Text. Selection is scoped to each rendered text block or table cell.
+
+The iOS module requires a new native build and runtime fingerprint; OTA alone does
+not install it. Older builds fall back to their existing text renderer. Native
+compilation and physical-device verification are pending. Verify selection handles,
+copying a partial range, scrolling during selection, link confirmation, streaming,
+large text, and VoiceOver/TalkBack before claiming device support. JavaScript tests
+and Hermes exports do not establish these native behaviors.
+
+## 2026-09-27: iOS multiline composer sizing
+
+A physical iPhone recording showed typed text wrapping beyond the visible input
+while the composer retained its initial height. Removing `numberOfLines` alone
+did not resolve the issue. The fixed-height input depended on
+`onContentSizeChange`, which the installed iOS Fabric implementation emits during
+layout updates.
+
+The composer now uses native text measurement with minimum and maximum heights,
+and enables native scrolling while expanded. It no longer sets a fixed expanded
+height or depends on a content-size callback. The regression check verifies these
+native layout constraints without injecting synthetic content-size events.
+
+The full checks, both Hermes exports, Expo Doctor, and native-runtime compatibility
+gate passed before direct preview OTA publication for runtime 0.1.4. The user
+confirmed that the correction worked on the phone. This confirms the reported
+iOS wrapping issue is resolved; Android device behavior and all font-scale and
+keyboard combinations were not verified by this follow-up.
+
+## 2026-09-18: server 2.0.8 identity compatibility
+
+After the first automated preview publication, an iOS diagnostic export showed
+client contract 2.0.4, an unknown server version, and two connection generations
+ending as incompatible before a snapshot could be installed. The new updater
+controls were visible. This confirms the updater loaded, but does not identify
+the failing request on the phone.
+
+The release workflow opened a 2.0.8 candidate and stopped at typechecking because
+the generated client removed `server.status` and `ServerStatus`. The published
+V2 OpenAPI document and installed 2.0.8 client expose `server.info` at `/api/info`.
+
+The adapter retains its mobile `server.status` operation, backed by the new
+generated method. It returns only the generated identity fields used by mobile,
+excluding the new server filesystem paths. It falls back to `/api/status` only
+after a 404 from `/api/info`, using the same authenticated, bounded,
+redirect-safe transport and cancellation signal. Authentication and server errors
+do not trigger fallback.
+
+Regression tests cover info-only and status-only servers and rejection of
+fallback on 401, 403, and 500 responses. All three isolated contract probes pass
+against both 2.0.4 and 2.0.8, including completed prompts, transcript paging,
+streaming and cancellation, permissions, and forms. The preview environment
+still matches both native fingerprint baselines for runtime 0.1.4. The full
+lint, typecheck, test, and build sequence passed, including 73 adapter tests,
+323 mobile tests, and both Hermes exports. Expo Doctor passed all 18 checks.
+
+The cloud release workflow subsequently passed, merged the tested candidate,
+validated the merged tree, and published the repair to both preview platforms.
+The publication tag matches the merged commit. This also exercised the required
+candidate checks without changing branch protection.
+
+The user confirmed that applying the update restored the connection. The user
+also confirmed the offline update-check procedure: a retryable error with the
+app still usable, followed by a successful check after connectivity returned.
+These follow-up confirmations did not specify a platform, so they do not certify
+both iOS and Android individually. Saving a newly edited draft across an update
+restart remains unverified on devices.
+
+## 2026-09-18: compatibility update automation
+
+The app now checks EAS independently of the OpenCode connection and offers a
+draft-preserving restart. Release workflows prepare stable V2 upgrade PRs, run
+contract checks, optionally attempt a cloud repair, and gate EAS publication on
+the installed runtime and native fingerprints.
+
+The published V2 docs and OpenAPI document were initially compared with the pinned
+`@opencode/client@2.0.3`. The published document exposes `/api/info` rather than
+the pinned client's `/api/health` and `/api/server`. The release detector found
+matching client and CLI release `2.0.7`. This comparison is not a claim that the
+current app supports that newer release; the upgrade workflow must validate and
+repair its candidate before publication.
+
+PR preparation incorporated the merged OpenCode 2.0.4 compatibility fix. The
+contract suite now uses its status and session-form operations and passes all
+three probes against an isolated 2.0.4 server. The required checks passed again
+with the results below.
+
+| Check | Result |
+| --- | --- |
+| Required lint, typecheck, test, build sequence | Pass |
+| Adapter unit tests | Pass, 68 tests |
+| Mobile tests, including update recovery and draft persistence | Pass, 323 tests |
+| Release-selection and repair-path gate tests | Pass, 3 tests |
+| Isolated OpenCode 2.0.4 server: scoped snapshots and session creation | Pass |
+| Isolated server: prompt admission, completed assistant transcript, and paging | Pass |
+| Isolated server: event receipt and cancellation | Pass |
+| Isolated server: exact-location permission and form replies | Pass |
+| iOS and Android Hermes bundle exports | Pass |
+| Expo Doctor | Pass, 18/18 checks |
+| GitHub workflow validation with actionlint | Pass |
+| Native fingerprint gate: matching baseline and mismatched runtime | Pass |
+| Cloud workflow execution, repair-agent execution, and EAS publication | Pending deployment configuration |
+| Update download and draft-preserving restart on signed iOS and Android | Pending device verification |
+
+Real-server tests used a disposable local server and deterministic loopback model
+provider. They required no provider account and did not access the user's shared
+server. These are Node transport results, not Hermes device results. See
+[Automatic compatibility updates](UPDATES.md) for activation and device probes.
+
+## 2026-09-16: server 2.0.4 API compatibility
+
+An iPhone screenshot showed an incompatible connection with cached session rows.
+The local server reports version 2.0.4 and returns 404 for `/api/health`.
+Both its OpenAPI document and the published V2 contract replace `/api/health`
+and `/api/server` with `/api/status`. The existing adapter contract test failed
+when the fake API stopped serving the removed routes, then passed after migration.
+
+The adapter now pins `@opencode/client@2.0.4` and matching transitive protocol
+and schema packages. Connection setup, reconnect snapshots, lifecycle probes,
+notification pairing, and broker validation use the status endpoint. The upgrade
+also adapts session updates, command names, inbox delivery changes and timestamps,
+interrupt resumption, form operations, permission decisions, skill paths, and
+directory-only public location responses.
+
+A temporary read-only probe passed against the local 2.0.4 server using the
+updated adapter. It checked status, locations, active sessions, projects, agents,
+commands, models, skills, permissions, forms, session lists, and a transcript page.
+The probe retained no server content and was removed from the deterministic test
+suite. This probe provides host-side evidence only.
+
+The required lint, typecheck, test, and build sequence passed, including 68 adapter
+tests, 305 mobile tests, and both Hermes bundle exports. Expo Doctor passed all
+18 checks. With user approval, the fix was published to the iOS and Android
+preview channel for runtime 0.1.4. EAS confirmed publication on both platforms.
+The user confirmed that the update restored operation on the iPhone. Android
+device confirmation remains pending.
+
+PR preparation rebased the fix onto the merged notification-optional pairing
+flow and migrated its direct-pairing status check too. The required checks passed
+again with 309 mobile tests, 68 adapter tests, both Hermes exports, and all 18
+Expo Doctor checks. This direct-pairing follow-up was not part of the published
+preview update.
+
+## 2026-09-14: client 2.0.3 transcript compatibility
+
+### Follow-up: immediate reconnect loop
+
+A later iPhone export confirms client contract 2.0.3 loaded, but all nine
+connection generations failed within zero or one millisecond. No snapshot was
+installed, no server version was learned, and no event was received.
+
+The new client's shared-event iterator calls `Promise.withResolvers()` before
+opening its stream. Removing that method in an adapter regression test produces
+an immediate TypeError. The coordinator cancels the generation on event failure,
+which also cancels the snapshot requests. This reproduces a client-side failure
+consistent with the device trace; the export does not include the exception.
+
+The adapter now installs a fallback only when the method is missing. The same
+test receives `server.connected` and verifies cancellation after the fix.
+The required check sequence passed with 68 adapter tests, 305 mobile tests, and
+both Hermes exports. Expo Doctor passed all 18 checks. A second iOS preview
+update was published for runtime 0.1.4. The user confirmed that the corrected
+update restored the connection on the physical iPhone. Android confirmation
+and a fresh transcript-specific device retest remain pending.
+
+The same transcript and Promise fallback fixes were subsequently published to
+the Android preview channel for runtime 0.1.4, matching the existing version
+0.1.4 build 6. EAS confirmed publication; Android device verification is pending.
+
+### Initial transcript fix
+
+The supplied iPhone diagnostics report app 0.1.4 build 7 using client contract
+beta 18387 against server 2.0.3. The connection reached connected, installed one
+snapshot, and recorded no durable sequence gaps. The screenshot reports
+unsupported transcript data. These artifacts do not include transcript payloads.
+
+The published V2 OpenAPI document and `@opencode/client@2.0.3` both define an
+`idle` transcript message with outcome `succeeded`, `failed`, or `interrupted`.
+A deterministic fake-API reproduction containing just one such message failed
+with `MALFORMED_MESSAGE_LIST` under the previous validator. All three outcomes
+now pass. This confirms a compatibility bug that produces the screenshot's
+error, without establishing the contents of the affected device session.
+
+The adapter now uses `@opencode/client@2.0.3` and its matching protocol and schema
+dependencies. Transcript rows show idle outcomes, and `session.idle` triggers
+an exact-session transcript refresh. Invalid idle outcomes remain rejected.
+
+| Check | Result |
+| --- | --- |
+| Required lint, typecheck, test, build sequence | Pass |
+| Adapter contract tests | Pass, 67 tests |
+| Mobile tests, including idle rendering and scoped reconciliation | Pass, 305 tests |
+| iOS and Android Hermes bundle exports | Pass |
+| Expo Doctor | Pass, 18/18 checks |
+| Updated app on physical iOS and Android against server 2.0.3 | Pending |
+
+The iOS fix was published through EAS Update to the existing preview channel
+for runtime 0.1.4. EAS confirms the published update. Device installation and
+transcript behavior still require an iPhone retest.
+
+## 2026-08-27: beta 18387 generated-client upgrade
+
+### Stack
+
+- OpenCode client, protocol, and schema: `0.0.0-beta-18387`
+- OpenCode notification plugin: `0.0.0-beta-18387`
+- Installed OpenCode CLI: `0.0.0-beta-18387`
+- Shared service used for the catalog probe: `0.0.0-beta-18371`
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Install matching client, protocol, schema, AI, and plugin packages | Pass |
+| Compile the adapter, mobile app, and notification plugin against the generated types | Pass |
+| List commands at the exact repository location | Pass |
+| Receive built-in and configured command records with names and optional descriptions | Pass |
+| Send command arguments as `text` and accept the generated client's `204` response | Pass in the deterministic fake API |
+| Keep a lost command response behind an explicit duplicate-risk retry guard | Pass |
+| Route beta 18387 step-streamed and message-content events to exact-session reconciliation | Pass |
+| Decode the beta 18387 interrupt response | Pass in the deterministic fake API |
+| Run all 293 mobile tests | Pass |
+| Export iOS and Android Hermes bundles | Pass |
+| Run Expo Doctor | Pass, 18/18 checks |
+
+Beta 18387 removes command templates from `Command.Info`. The command endpoint
+also replaces `arguments`, client message IDs, and inbox responses with `text`
+and a `204` response. Prompt admission IDs remain stable and reconcilable.
+Command delivery cannot be identified after a response is lost, so the app
+refreshes server state, preserves the draft, and requires an explicit retry.
+The catalog probe recorded no address, credential, identifier, path, prompt, or
+server content.
+
+## 2026-08-24: local beta 18050 interaction-scope probes
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Create a temporary session permission whose policy effect is `ask` | Pass |
+| Retrieve the request through the session-owned permission list | Pass |
+| Retrieve the request through its exact location | Pass |
+| Retrieve the request through another directory in the same project | Not returned |
+| Find the blocked session in `/api/session/active` | Not returned |
+| Reject the request and remove the temporary session | Pass |
+
+The same controlled probe was repeated with a pending form:
+
+| Probe | Result |
+| --- | --- |
+| Create a temporary session form | Pass |
+| Retrieve the form and its pending state through the session endpoints | Pass |
+| Retrieve the form through its exact location | Pass |
+| Retrieve the form through another directory in the same project | Not returned |
+| Find the form-blocked session in `/api/session/active` | Not returned |
+| Cancel the form and remove the temporary session | Pass |
+
+Permission and form reconciliation are exact-location scoped on the tested
+server. A project root does not aggregate requests from another directory in
+that project, and the connection-wide active-session snapshot cannot discover
+every blocked session. A cross-project attention inbox must discover session
+locations through project-scoped session metadata and show incomplete coverage
+until those locations reconcile. The probes retained no request resources,
+answers, paths, session IDs, permission IDs, or form IDs.
+
+## 2026-08-23: physical iPhone REST probe
+
+### Stack
+
+- Mobile runtime: Expo Go with Expo SDK 54.0.37
+- React Native: 0.81.5
+- React: 19.1.0
+- OpenCode client: `@opencode-ai/client@0.0.0-beta-17963`
+- OpenCode server: `0.0.0-beta-17963`
+- Network: Tailscale, using explicitly approved cleartext development HTTP
+- Authentication: Basic credentials loaded by the connection form and stored in
+  SecureStore after successful validation
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Expo Go loads the application through Tailscale Metro | Pass |
+| `GET /api/health` | Pass |
+| `GET /api/server` | Pass |
+| `GET /api/session?limit=1&order=desc` | Pass |
+| Unauthorized server challenge before credentials | Pass |
+| Generated Promise client bundles without Node service imports | Pass |
+
+### Not yet tested
+
+- Oversized SSE events and JSON responses
+- iOS Simulator, Android Emulator, and physical Android behavior
+
+## 2026-08-23: physical iPhone global fetch SSE probe
+
+### Result
+
+Fail. The authenticated request reached `/api/event`, received HTTP 200, and
+remained open until the probe aborted it after 10 seconds. No event reached
+JavaScript.
+
+React Native 0.81 implements global `fetch` with `whatwg-fetch`, which does not
+expose an infinite response body incrementally. The generated OpenCode client
+supports a custom fetch function, so the mobile app now supplies `expo/fetch`.
+Expo documents streamed response bodies as supported by this implementation.
+The first replacement-transport run reached the server, received HTTP 200, and
+closed within 111 ms after the probe initiated cancellation. Expo reports that
+native cancellation as a platform network error rather than a DOM `AbortError`.
+The probe now treats read termination as successful cancellation when its own
+signal is already aborted. Regular REST calls continue using React Native's
+global fetch; only event streaming uses `expo/fetch`.
+
+### Replacement transport result
+
+| Probe | Result |
+| --- | --- |
+| Receive initial `server.connected` event through generated async iterable | Pass |
+| Stop the pending stream read with `AbortSignal` | Pass |
+| Complete cancellation within three seconds | Pass |
+
+This confirms generated-client event streaming and cancellation on a physical
+iPhone running Expo Go and Hermes. Event payloads were neither displayed nor
+persisted; the diagnostic retained only the event type.
+
+## 2026-08-23: physical iPhone PTY probe
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Resolve and use an explicit server location | Pass |
+| Create a temporary PTY through the generated client | Pass |
+| Mint a single-use PTY connect ticket | Pass |
+| Open the ticketed WebSocket through Tailscale | Pass |
+| Send and receive the probe marker | Pass |
+| Close the socket and remove the temporary PTY | Pass |
+
+This confirms the PTY REST and WebSocket flow on a physical iPhone running Expo
+Go and Hermes. The probe retained no terminal output or ticket. It allowed at
+most 64 KiB of output while waiting for the marker.
+
+## 2026-08-23: physical iPhone lifecycle probe
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Hold an event stream open before backgrounding | Pass |
+| Observe the app entering the background | Pass |
+| Cancel the old stream within three seconds | Pass |
+| Check server health after returning to the foreground | Pass |
+| Receive `server.connected` from a fresh event generation | Pass |
+
+This confirms foreground recovery transport on a physical iPhone running Expo
+Go and Hermes. The probe ignored transient `inactive` states and retained only
+event types and pass or failure state. It did not claim or test full durable
+session reconciliation.
+
+## 2026-08-23: physical iPhone connection-profile flow
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Create and test a connection draft before persistence | Pass |
+| Save non-secret profile metadata in SQLite | Pass |
+| Reload and reuse credentials from SecureStore | Pass |
+| Edit and select saved profiles | Pass |
+| Confirm and remove a profile | Pass |
+| Keep the removed profile absent after reload | Pass |
+
+This confirms the connection-profile flow in Expo Go on a physical iPhone. The
+report retains no profile names, server addresses, credential references, or
+credentials.
+
+## 2026-08-23: physical iPhone app-lock flow
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Enable device authentication after a system prompt | Pass |
+| Lock after leaving the foreground | Pass |
+| Authenticate and reveal saved connections | Pass |
+| Retain the enabled preference after reload | Pass |
+
+This confirms the optional app lock in Expo Go on a physical iPhone. The report
+does not retain the authentication method or any platform authentication data.
+
+## 2026-08-24: physical iPhone event-stability regression
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Render diagnostic timestamps in device-local time with an explicit offset | Pass |
+| Receive plugin, integration, MCP, catalog, agent, command, skill, and reference events | Pass |
+| Remain connected throughout the server startup event burst | Pass |
+| Avoid starting new stream generations for advisory registration events | Pass |
+| Connect through behavioral probes after updating the server and generated client to beta 18050 | Pass |
+| Switch rapidly between two saved profiles and back without stale state crossing profiles | Pass |
+| Apply bounded reconnect backoff while the server is unavailable | Pass |
+| Show bounded cached project and active-session counts during a cold server outage | Pass |
+| Recover through a fresh event generation after the server returns | Pass |
+| Aggregate repeated event types without displacing transport status history | Pass |
+
+The bounded diagnostic contained event types and transport state only. It
+contained no server address, credential, project path, prompt, session content,
+or event payload.
+
+## 2026-08-24: physical iPhone native-shell flow
+
+### Result
+
+| Probe | Result |
+| --- | --- |
+| Navigate the phone workspace, pending-work, settings, and connection-management shell | Pass |
+| Recover the shell and freshness indicator after an OpenCode service restart | Pass |
+| Preserve correct shell behavior through background and foreground transitions | Pass |
+| Keep the connection form usable through portrait, landscape, and keyboard appearance | Pass |
+| Unlock after native authentication temporarily moves the app through `inactive` | Pass |
+| Large-text layout | Skipped |
+| Reduced-motion navigation | Skipped |
+
+The shell test used Expo Go on a physical iPhone. Android and tablet behavior
+remain unverified. The pending-work destination intentionally reports unavailable
+state until a server-resolved location enables authoritative interaction queries.
+
+## 2026-08-24: milestone 6 contract and lifecycle probe
+
+### Stack
+
+- OpenCode client: `@opencode-ai/client@0.0.0-beta-18050`
+- OpenCode server: `0.0.0-beta-18050`
+- Runtime: local OpenCode CLI and background service on Linux
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Resolve the default server location and current project | Pass |
+| Load location-scoped agent and model choices | Pass |
+| Confirm `cursor.next` returns older sessions for descending lists | Pass |
+| Create a temporary session at the resolved location | Pass |
+| Rename and reload the temporary session | Pass |
+| Remove the temporary session and confirm it is absent from search | Pass |
+| Deterministic empty, 120-session, paginated, searched, and concurrently changed lists | Pass |
+| Abort obsolete location reads after selection changes | Pass |
+
+The probe printed only booleans, counts, and response key names. It did not print
+or retain a server address, project path, session ID, title, credential, prompt,
+or content. This verifies the V2 contract and server lifecycle from the local
+development environment. It does not satisfy physical iOS or Android milestone 6
+verification.
+
+## 2026-08-24: milestone 7 transcript contract slice
+
+### Stack
+
+- OpenCode client: `@opencode-ai/client@0.0.0-beta-18050`
+- Published V2 OpenAPI: experimental version `0.0.1`
+- Runtime: React Native Hermes export for iOS and Android
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Confirm npm `@beta`, published OpenAPI, and installed generated client agree | Pass |
+| Load newest-first message pages and follow `cursor.next` toward older messages | Pass |
+| Omit `order` from cursor requests and preserve the original order | Pass |
+| Validate every current message variant and all four assistant tool states | Pass |
+| Reject malformed and unknown projected message shapes with a redacted error | Pass |
+| Keep inline attachment data and file URIs out of rendered transcript rows | Superseded |
+| Render bounded inline PNG, JPEG, GIF, and WebP data as images without network requests; keep other file URIs as labels | Unit tests pass; device check pending |
+| Strip ANSI controls and bound progressively revealed text and tool output | Pass |
+| Coalesce text, reasoning, and tool event projection to one cache write per frame | Pass |
+| Replace volatile fragments with terminal event values and refetch projection gaps | Pass |
+| Restrict event projection by connection, location, session, and cache order | Pass |
+| Build iOS and Android Hermes exports with the virtualized transcript | Pass |
+
+These are deterministic fake-API and export checks. A real-server message cursor
+probe, physical-device scroll anchoring, and streaming render measurements remain
+pending. The query bridge now reduces beta 18050 text, reasoning, tool, retry, and
+step events in arrival order with one write per matching transcript cache per
+display frame. Terminal fragment events replace volatile accumulated values.
+Execution completion, reconnect, foreground restoration, malformed payloads, and
+missing projection prerequisites still refetch authoritative REST state for the
+affected session.
+
+The transcript now uses a deterministic live-follow latch. Rendered tests verify
+that content growth pins the inverted list at offset zero while following, user
+scrolling disables that pin through momentum, programmatic compensation does not
+disable it, and the explicit latest control re-enables it. Physical iPhone tests
+passed normal streaming, pause and re-entry, older-page anchoring, foreground
+recovery, rotation, child-session loading, and service restart recovery. An
+intermittent latest-button failure, slow `VirtualizedList` warnings, inconsistent
+large-text scaling, and generic subagent presentation remain unresolved.
+
+## 2026-08-24: transcript remediation and physical retest
+
+| Probe | Deterministic result |
+| --- | --- |
+| Reflow shell, transcript controls, disclosures, and sheets after a live font-scale change | Pass |
+| Keep `Latest` visible until native scrolling confirms the live edge | Pass |
+| Skip unchanged transcript rows while a different row streams | Pass |
+| Render V2 task and subagent tools as dedicated cards | Pass |
+| Suppress current task wrappers and legacy task metadata from assistant text | Pass |
+| Open a validated child session from a subagent card | Pass |
+| Count currently running background subagents from projected V2 state | Pass |
+| Reflow workspace and transcript lists after a live iOS text-size change | Pass |
+| Keep accessibility-sized navigation labels on one scrollable line | Pass |
+| Keep the accessibility-sized `Latest` control out of transcript content | Pass |
+
+These checks use generated beta 18050 message types and the current published V2
+OpenAPI contract. React Native 0.81's `VirtualizedList` warning is triggered by
+two scroll-event gaps over 500 ms when content exceeds five viewports; it does
+not measure component render duration. The app still removes the demonstrated
+render churn by memoizing rows whose generated message objects are unchanged.
+The physical iPhone retest changed to the second-largest accessibility text size
+without restarting the app. Targeted list remounts cleared stale virtualized cell
+measurements, the bottom navigation remained usable, and `Latest` occupied layout
+space instead of covering the transcript. A follow-up constrained the horizontal
+navigation scroller to its content height after a screenshot exposed vertical
+expansion; the physical reload confirmed the navigation was compact again. The
+result is acceptable for the foundation milestone. Finer large-text density work
+remains a later follow-up.
+
+The in-app redacted support report now includes numeric transcript measurements:
+projection frames, events, cache writes, reconciliation count, maximum reduction
+duration, committed row frames, loaded page/message peaks, follow corrections,
+and explicit latest jumps. It does not read or retain message strings and marks
+the exported block with `content_included=false`. Deterministic tests verify
+frame aggregation and report formatting.
+
+## 2026-08-24: physical iPhone transcript streaming baseline
+
+| Measurement | Observed |
+| --- | ---: |
+| Projection events | 192 |
+| Projection frames | 78 |
+| Transcript cache writes | 14 |
+| Projection reconciliations | 0 |
+| Maximum events in one projection frame | 14 |
+| Maximum projection duration | 12.980 ms |
+| Committed transcript rows | 49 |
+| Row-commit frames | 16 |
+| Maximum row commits in one display frame | 12 |
+| Maximum resident pages | 1 |
+| Maximum resident messages | 41 |
+| Live-follow corrections | 11 |
+| Explicit latest jumps | 3 |
+
+The probe kept a 41-message transcript visible while a controlled tool emitted
+output for 30 seconds. The tester scrolled away from the live edge and returned
+with `Latest`; the app remained responsive. Frame coalescing reduced 192 events
+to 14 transcript cache writes, and no projection gap required reconciliation.
+The maximum measured projection duration stayed below one 60 Hz frame interval.
+
+This is an iPhone baseline, not a final device budget. The report records the
+bounded resident page and message counts, not process memory in bytes. The spec
+requires an older iPhone and a lower-midrange Android device before setting final
+performance budgets and minimum supported devices.
+
+## 2026-08-24: physical iPhone session-list stability
+
+| Probe | Result |
+| --- | --- |
+| Keep the session list fixed during volatile usage and transcript updates | Pass |
+| Reserve pull-to-refresh chrome for an explicit user refresh | Pass |
+| Keep the project/location control stable during file-change events | Pass |
+| Reorder the updated session once at completion without moving the list header | Pass |
+
+The original implementation invalidated the session list for volatile usage,
+showed the native pull indicator for background query work, and invalidated the
+whole connection for file-change hints. On the physical iPhone this caused
+repeated list movement and a blinking project/location control while a desktop
+agent worked. The query bridge now ignores those volatile hints, execution
+completion remains the authoritative session-list reconciliation point, and the
+session list no longer applies visible-position compensation when rows reorder.
+
+## 2026-08-24: milestone 8 composer contract slice
+
+### Stack
+
+- OpenCode client: `@opencode-ai/client@0.0.0-beta-18050`
+- Published V2 OpenAPI: experimental version `0.0.1`
+- Runtime: React Native Hermes export for iOS and Android
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Forward generated prompt, inbox, agent, model, interrupt, background, and wait operations | Pass |
+| Generate one caller-owned `msg_` ID before prompt transmission | Pass |
+| Block same-frame duplicate taps | Pass |
+| Keep a lost or conflicting response in unknown-delivery state | Pass |
+| Reconcile unknown delivery through inbox and single-message REST reads | Pass |
+| Keep resend blocked when one inbox/message snapshot does not contain an unknown ID | Pass |
+| Require an explicit duplicate-risk acknowledgement before retrying an absent ID | Pass |
+| Persist unresolved admission IDs before transmission and restore them after restart | Pass |
+| Persist the encrypted submitted revision before admission metadata and HTTP | Pass |
+| Preserve a newer draft when an earlier admission is confirmed | Pass |
+| Keep all mutations from pausing into an automatic reconnect outbox | Pass |
+| Keep the editor read-only until its encrypted draft revision loads | Pass |
+| Keep pending admission state scoped when the visible session changes | Pass |
+| Require an explicit queue or steer choice during active execution | Pass |
+| Reconcile queued work after reconnect and replace overlays by projected message ID | Pass |
+| Encrypt drafts with XChaCha20-Poly1305 and connection/session additional data | Pass |
+| Keep draft keys in device-only SecureStore and remove drafts with connection profiles | Pass |
+| Enumerate and clear the full paginated child tree when deleting a session | Pass |
+| Generate an iOS startup guard that excludes the Expo SQLite directory from backups | Pass |
+| Build iOS and Android Hermes exports | Pass |
+
+These checks use generated beta 18050 types. The app serializes the encrypted
+submitted draft, content-free unresolved admission row, and HTTP request in that
+order. Draft revisions survive restart without exposing prompt text. Tests do not
+record IDs, prompt text, server addresses, paths, or credentials. Android backups
+remain disabled at the application level. The iOS plugin creates
+`Documents/SQLite`, applies the backup-exclusion resource value before JavaScript
+starts, and stops startup if that security operation fails.
+
+One physical iPhone text turn streamed assistant text and shell state, but it
+also exposed two UI failures: the focused composer placed Send below the
+keyboard, and a permission request shown by the terminal was not visible in the
+open mobile session. A second check confirmed that keeping Send in the editor
+row made it reachable, but the built-in keyboard avoidance still expanded the
+composer into the iOS suggestion bar. Expo SDK 54's bundled keyboard controller
+then reproduced an upstream iOS/New Architecture bug where a sticky view can
+retain the wrong position after a keyboard cycle. The composer keeps the
+measured floating layout, but now derives its position independently from every
+native keyboard frame so no animated keyboard height survives between openings.
+
+Permission events update the location cache immediately before REST
+reconciliation, and permission requests can be answered from the open session
+or global Pending screen. These fixes still need another physical iPhone
+retest, and Android text-turn testing remains pending.
+
+## 2026-08-25: physical iPhone self-hosted push probe
+
+### Stack
+
+- Mobile runtime: signed EAS test build on a physical iPhone using Hermes
+- Expo SDK: 54.0.37
+- React Native: 0.81.5
+- OpenCode plugin and client: beta 18050
+- Network: explicitly approved private-network development HTTP
+- Delivery: self-hosted Linux broker, Expo Push Service, and APNs
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Enable the Apple Push Notifications capability and regenerate the Ad Hoc profile | Pass |
+| Pair through a two-minute encrypted QR bootstrap | Pass |
+| Store one active iPhone registration in the broker | Pass |
+| Receive the automatic post-pairing test notification | Pass |
+| Receive a plugin-projected permission notification while locked | Pass |
+| Unlock and route a warm notification tap to the owning session | Pass |
+| Receive a permission notification while the app is terminated | Pass |
+| Cold-start from the notification tap and route to the owning session | Pass |
+
+The first signed build exposed a Hermes compatibility bug before network I/O:
+React Native's `abort-controller` implementation does not provide the static
+`AbortSignal.timeout()` method. Notification device requests now use an
+`AbortController` with a bounded timer, backed by a regression test that removes
+the static method. The successful probe recorded no address, credential, push
+token, pairing secret, session identifier, request identifier, prompt, or server
+content.
+
+Receipt completion, duplicate-envelope handling, revocation, re-pairing, and
+form cold-start routing subsequently passed on the same physical iPhone. A
+genuinely changed provider token was not forced; the normal registration refresh
+path passed with the existing token.
+
+Expo Go does not run the custom iOS backup plugin. The signed preview launched
+with the fail-closed startup guard, confirming that the native exclusion call
+completed; independent backup extraction remains pending.
+Hardware-keyboard shortcuts are also pending because React Native's
+cross-platform `TextInput` key event omits modifier state.
+
+## 2026-08-25: Android FCM V1 configuration
+
+The Android test build receives its ignored Firebase client configuration from
+an EAS file environment variable. EAS stores the FCM sending credential
+separately. No private service-account key is stored in the repository. Physical
+Android token registration and delivery were verified with the signed
+FCM-enabled build below.
+
+## 2026-08-25: physical Android notification probe
+
+### Stack
+
+- Mobile runtime: signed EAS test build on a physical Android device using Hermes
+- Expo SDK: 54.0.37
+- React Native: 0.81.5
+- OpenCode plugin and client: beta 18050
+- Network: explicitly approved private-network development HTTP
+- Delivery: self-hosted Linux broker, Expo Push Service, and FCM V1
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Pair through the encrypted two-minute QR bootstrap | Pass |
+| Register one active Android device and receive the automatic FCM notification | Pass |
+| Force-close, reopen, reload the paired connection, and list sessions | Pass |
+| Complete and reopen one streaming text turn with the composer above the keyboard | Pass |
+| Present and answer a one-time external-directory permission | Pass |
+| Receive a form notification while locked with the app terminated | Pass |
+| Cold-start from the notification and route to the pending form | Pass |
+| Recover after airplane-mode network loss and complete one non-duplicated turn | Pass |
+| Load at least three older pages in a large transcript and return with `Latest` | Pass |
+| Resolve all outstanding Android Expo tickets through successful receipts | Pass |
+| Restart the broker process, retain registration, and deliver another test push | Pass |
+
+The probe recorded no address, credential, token, pairing code, identifier,
+prompt, path, or server content. A full host reboot, forced provider-token
+rotation, Android revocation/re-pairing, and device-log review remain open. The
+device-log review could not run because Android platform tools were unavailable
+on the test host.
+
+## 2026-08-26: physical iPhone notification controls probe
+
+### Stack
+
+- Mobile runtime: signed EAS preview build with an iOS EAS Update using Hermes
+- Expo SDK: 54.0.37
+- React Native: 0.81.5
+- OpenCode server: beta 18286
+- OpenCode plugin and mobile client contract: beta 18050
+- Delivery: self-hosted Linux broker, Expo Push Service, and APNs
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Deliver banner, sound, and notification-list entry while app is backgrounded | Pass |
+| Wake the locked screen, present the notification, and play sound | Pass |
+| Suppress banner, sound, badge, and notification-list entry while app is foregrounded | Pass |
+| Pause from mobile and observe the broker state | Pass |
+| Suppress delivery while paused and avoid replay after enabling | Pass |
+| Enable delivery and receive a new post-resume notification | Pass |
+| Load TUI status, pause, and enable commands from the command palette and slash completion | Pass |
+| Reflect TUI changes after reopening mobile Settings | Pass |
+| Preserve paused state and suppression across a broker restart | Pass |
+| Route and settle a real permission in mobile and the TUI | Pass |
+| Cold-start from a permission notification and route to the owning session | Pass |
+| Route a global form at an exact non-followed location and submit it | Pass after fix |
+
+The first global-form probe opened Pending but showed zero requests. The
+notification location had been combined with ordinary event locations and then
+filtered out because its project was not followed. Notification-owned locations
+now remain explicit, while ordinary event locations retain the followed-project
+filter. A focused provider regression test failed before the change and passed
+after it. The corrected preview update then passed on the same physical iPhone.
+
+The tested OpenCode beta did not resolve the local package directory as a server
+plugin, and registering a keymap layer directly during TUI plugin setup failed
+before the keymap provider mounted. The tested configuration loads the compiled
+server and TUI files separately. The TUI commands register from a provider-backed
+slot component.
+
+The probe recorded no address, credential, token, pairing code, identifier,
+prompt, path, form response, or server content.
+
+## 2026-08-31: OpenCode TUI notification controls probe
+
+### Stack
+
+- Host: Linux
+- OpenCode CLI and server: beta 18721
+- OpenCode notification plugin contract: beta 18387
+- Notification broker: local systemd user service
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Load the server and TUI plugins from the compiled `dist` directory | Pass |
+| List status, pause, and enable controls in the command palette | Pass |
+| Invoke enable through authenticated loopback ingress and persist the broker state | Pass |
+| Register controls without opening the TUI sidebar | Pass after fix |
+
+The controls were previously registered from an empty `sidebar.footer` slot.
+OpenCode beta 18721 does not render that slot while the sidebar is closed, so the
+commands were absent. Registering from the always-mounted `app` slot keeps the
+keymap layer under the required TUI provider and makes the commands available on
+startup.
+
+The probe recorded no address, credential, token, identifier, prompt, path, or
+server content.
+
+## 2026-08-26: physical iPhone command-event stability
+
+### Stack
+
+- Mobile runtime: signed EAS preview build with an iOS EAS Update using Hermes
+- Expo SDK: 54.0.37
+- React Native: 0.81.5
+- OpenCode server: beta 18286
+- Mobile client contract: beta 18050
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Capture payload-free event types during shell-backed TUI work | Pass |
+| Keep the server event stream open throughout each command burst | Pass |
+| Avoid connection-wide invalidation for `shell.created`, `shell.exited`, and `shell.deleted` | Pass |
+| Avoid connection-wide invalidation for `vcs.branch.updated` | Pass |
+| Keep `installation.update-available` on the current healthy stream generation | Pass |
+| Keep the Live indicator stable during read-only Git work | Pass |
+| Keep the session list stable during file creation, patching, reading, hashing, deletion, and Git work | Pass |
+| Remove the temporary probe file without changing repository files | Pass |
+
+The beta 18286 event trace showed a shell lifecycle burst for every shell-backed
+TUI tool call. The beta 18050 mobile classifier did not know these event types,
+so it fell back to connection-wide invalidation and repeatedly refetched the
+session list. The mobile bridge now treats the shell lifecycle and branch-change
+events as advisory for the current foundation UI. An available-update advisory
+also no longer replaces a healthy stream; `installation.updated`, real stream
+failure, durable sequence uncertainty, foreground recovery, and network recovery
+retain their reconciliation behavior.
+
+The signed iPhone applied the preview update and showed no Live or session-list
+flicker during the controlled command checks. The trace and report retained no
+command text, address, credential, path, prompt, identifier, event payload, file
+content, or server content.
+
+## 2026-08-27: physical Android 17 composer probe
+
+### Stack
+
+- Mobile runtime: signed EAS preview build using Hermes
+- Device: Pixel 8 Pro running Android 17
+- Expo SDK: 54.0.37
+- React Native: 0.81.5
+- Keyboard controller: 1.18.5
+
+### Results
+
+| Probe | Result |
+| --- | --- |
+| Install and launch preview version 0.1.4, build 6 | Pass |
+| Focus the session composer and show the software keyboard | Pass |
+| Keep the composer visible directly above the keyboard | Pass |
+
+The prior build relied on activity resize and hid the composer behind the
+keyboard on this device. The corrected build keeps the transcript container
+fixed and moves only the composer dock from native keyboard inset animation
+frames. The probe recorded no address, credential, identifier, path, prompt, or
+server content.
