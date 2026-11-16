@@ -56,32 +56,31 @@ jobs:
           echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
           echo "WS=$WS SCHEME=$SCHEME"
 
-      - name: Archive (unsigned)
+      - name: Build (unsigned Release)
         working-directory: apps/mobile/ios
         run: |
+          set -euo pipefail
           xcodebuild \
             -workspace "${{ steps.xc.outputs.workspace }}" \
             -scheme "${{ steps.xc.outputs.scheme }}" \
             -configuration Release \
             -sdk iphoneos \
             -derivedDataPath build \
-            -archivePath "$PWD/build/OpenCode.xcarchive" \
+            -destination 'generic/platform=iOS' \
+            CONFIGURATION_BUILD_DIR="$PWD/build/out" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
             EXPANDED_CODE_SIGN_IDENTITY="" \
-            archive
+            build
 
       - name: Package Payload into IPA
         working-directory: apps/mobile/ios
         run: |
           set -euo pipefail
-          echo "=== searching archives/apps"
-          find . -maxdepth 4 -name '*.xcarchive' -o -maxdepth 6 -name '*.app' -type d | head -20
-          APP=$(find . -path '*.xcarchive/Products/Applications/*.app' -maxdepth 8 -type d | head -1)
-          if [ -z "$APP" ]; then
-            APP=$(find . -name '*.app' -type d -not -path '*/Pods/*' -not -path '*/build/Build/*' | head -1)
-          fi
+          echo "=== apps found:"
+          find build -name '*.app' -type d | head -20
+          APP=$(find build -maxdepth 2 -name '*.app' -type d | head -1)
           echo "app=$APP"
           test -n "$APP"
           rm -rf out && mkdir -p out/Payload
@@ -90,6 +89,7 @@ jobs:
           zip -qry ../OpenCode-unsigned.ipa Payload
           cd ..
           ls -lh OpenCode-unsigned.ipa
+          unzip -l OpenCode-unsigned.ipa | head -5
 
       - uses: actions/upload-artifact@v4
         with:
