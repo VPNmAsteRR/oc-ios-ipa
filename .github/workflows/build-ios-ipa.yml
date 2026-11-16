@@ -73,24 +73,35 @@ jobs:
             EXPANDED_CODE_SIGN_IDENTITY="" \
             build
 
-      - name: Package Payload into IPA
+      - name: Locate and package IPA
         working-directory: apps/mobile/ios
         run: |
           set -euo pipefail
-          echo "=== dd tree:"
-          ls -la dd 2>/dev/null | head
-          find "$PWD/dd" -name '*.app' -type d 2>/dev/null | head -20
-          APP=$(find "$PWD/dd/Build/Products/Release-iphoneos" -maxdepth 1 -name '*.app' -type d 2>/dev/null | head -1)
-          if [ -z "$APP" ]; then APP=$(find "$PWD/dd" -name '*.app' -type d 2>/dev/null | grep -v 'Pods\|Tests' | head -1); fi
-          echo "app=$APP"
-          test -n "$APP"
+          echo "=== build settings"
+          BPD=$(xcodebuild -workspace "${{ steps.xc.outputs.workspace }}" -scheme "${{ steps.xc.outputs.scheme }}" -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null | awk -F' = ' '/ BUILT_PRODUCTS_DIR /{print $2; exit}')
+          NAME=$(xcodebuild -workspace "${{ steps.xc.outputs.workspace }}" -scheme "${{ steps.xc.outputs.scheme }}" -configuration Release -sdk iphoneos -showBuildSettings 2>/dev/null | awk -F' = ' '/ FULL_PRODUCT_NAME /{print $2; exit}')
+          echo "BUILT_PRODUCTS_DIR=$BPD"
+          echo "FULL_PRODUCT_NAME=$NAME"
+
+          CANDIDATES=""
+          [ -n "$BPD" ] && [ -n "$NAME" ] && [ -d "$BPD/$NAME" ] && CANDIDATES="$BPD/$NAME"
+          if [ -z "$CANDIDATES" ]; then
+            echo "=== fallback search"
+            CANDIDATES=$(find "$GITHUB_WORKSPACE" "$HOME/Library/Developer/Xcode/DerivedData" \
+              -type d -name '*.app' -not -path '*/Pods/*' -not -path '*Tests*' 2>/dev/null | head -5)
+            echo "$CANDIDATES"
+          fi
+          APP=$(echo "$CANDIDATES" | head -1)
+          echo "APP=$APP"
+          test -n "$APP" && test -d "$APP"
+
           rm -rf out && mkdir -p out/Payload
           cp -R "$APP" out/Payload/
           cd out
           zip -qry ../OpenCode-unsigned.ipa Payload
           cd ..
           ls -lh OpenCode-unsigned.ipa
-          unzip -l OpenCode-unsigned.ipa | head -5
+          unzip -l OpenCode-unsigned.ipa | head -6
 
       - uses: actions/upload-artifact@v4
         with:
